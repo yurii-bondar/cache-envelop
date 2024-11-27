@@ -1,0 +1,38 @@
+{
+  "name": "cache-envelop",
+  "version": "1.0.0",
+  "description": "Wrapper for working with caching services (Memcached, Redis)",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yurii-bondar/cache-envelop.git"
+  },
+  "main": "index.js",
+  "scripts": {
+    "lint": "npx eslint ./"
+  },
+  "keywords": [
+    "redis",
+    "ioredis",
+    "memcached",
+    "cache",
+    "caching",
+    "wrappers",
+    "envelops",
+    "helpers"
+  ],
+  "author": {
+    "name": "Yurii Bondar",
+    "email": "yurii.bondar.vn@gmail.com"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@babel/eslint-parser": "^7.25.9",
+    "eslint": "^8.57.1",
+    "eslint-config-airbnb-base": "^15.0.0",
+    "eslint-plugin-import": "^2.31.0"
+  },
+  "dependencies": {
+    "ioredis": "^5.4.1",
+    "memcached": "^2.2.2"
+  }
+}
