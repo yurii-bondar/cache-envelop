@@ -1,7 +1,3 @@
 .idea/
-app/helpers/console.js
-app/helpers/require.js
-app/helpers/mongodbPromiseWrapper.js
-/server/controllers/photoController.js
-/cron/jobs
-/src/Memcached.js
+node_modules/
+coverage/

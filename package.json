@@ -1,6 +1,6 @@
 {
   "name": "cache-envelop",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Wrapper for working with caching services (Memcached, Redis)",
   "repository": {
     "type": "git",
@@ -8,7 +8,9 @@
   },
   "main": "index.js",
   "scripts": {
-    "lint": "npx eslint ./"
+    "lint": "npx eslint ./",
+    "test": "jest",
+    "test:coverage": "jest --coverage"
   },
   "keywords": [
     "redis",
@@ -29,7 +31,8 @@
     "@babel/eslint-parser": "^7.25.9",
     "eslint": "^8.57.1",
     "eslint-config-airbnb-base": "^15.0.0",
-    "eslint-plugin-import": "^2.31.0"
+    "eslint-plugin-import": "^2.31.0",
+    "jest": "^30.4.2"
   },
   "dependencies": {
     "ioredis": "^5.4.1",
