@@ -7,6 +7,10 @@
     "url": "https://github.com/yurii-bondar/cache-envelop.git"
   },
   "main": "index.js",
+  "files": [
+    "index.js",
+    "src"
+  ],
   "scripts": {
     "lint": "npx eslint ./",
     "test": "jest",
