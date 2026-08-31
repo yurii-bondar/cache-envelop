@@ -1,8 +1,9 @@
 const { promisify } = require('util');
 const Memcached = require('memcached');
 
+const { checkKey, checkTtl, parseStored } = require('./validators');
+
 const LIST_NUMERIC_OPTIONS = ['index', 'start', 'end'];
-const TTL_ERROR = 'The ttl must be a non-negative number of seconds (0 means no expiration)';
 
 /**
  * Default handler for the underlying memcached client's diagnostic events
@@ -25,8 +26,6 @@ class MemcachedWrapper {
   #client = null;
 
   #connectionArgs = '127.0.0.1:11211';
-
-  #maxLengthKey = 250;
 
   #options = { timeout: 300 };
 
@@ -85,46 +84,6 @@ class MemcachedWrapper {
   }
 
   /**
-   * Validates a cache key against Memcached's own protocol constraints: keys are
-   * limited to 250 bytes and may not contain whitespace (the text protocol is
-   * space-delimited, so a key with a space is rejected by the server itself).
-   * Both checks run against the key as it will actually be sent, so a key that
-   * passes here is a key the server will accept.
-   * @param {string | number} key
-   */
-  #checkKeyValidity(key) {
-    if (key === undefined || key === null) throw new Error('The key cannot be empty');
-    if (typeof key !== 'string' && typeof key !== 'number') {
-      throw new Error('The key must be a string or a number');
-    }
-
-    const stringKey = String(key);
-    if (!stringKey.trim()) throw new Error('The key cannot be empty');
-    if (/\s/.test(stringKey)) {
-      throw new Error('The key must not contain whitespace characters');
-    }
-    if (stringKey.length > this.#maxLengthKey) {
-      throw new Error(`The key must not exceed ${this.#maxLengthKey} characters`);
-    }
-  }
-
-  /**
-   * Validates a TTL and returns it as a number. Every method that writes a key
-   * back to the cache requires one: silently reusing a default would reset the
-   * expiration of an existing entry without the caller noticing.
-   * @param {number} ttl
-   * @returns {number}
-   */
-  // eslint-disable-next-line class-methods-use-this
-  #checkTtlValidity(ttl) {
-    const numericTtl = Number(ttl);
-    if (ttl === undefined || Number.isNaN(numericTtl) || numericTtl < 0) {
-      throw new Error(TTL_ERROR);
-    }
-    return numericTtl;
-  }
-
-  /**
    * Validates and normalizes the `options` object of the list helpers. Unknown
    * keys and out-of-range positions are rejected rather than ignored: a typo
    * such as `{ idx: 0 }` used to fall through to "no position given" and wipe
@@ -169,22 +128,6 @@ class MemcachedWrapper {
   }
 
   /**
-   * Parses a JSON string previously stored by this wrapper, raising a clear
-   * error instead of letting a corrupted cache entry throw a cryptic
-   * SyntaxError deep inside a hash/list operation.
-   * @param {string} value
-   * @returns {any}
-   */
-  // eslint-disable-next-line class-methods-use-this
-  #parseStored(value) {
-    try {
-      return JSON.parse(value);
-    } catch (err) {
-      throw new Error(`Failed to parse cached value as JSON: ${err.message}`);
-    }
-  }
-
-  /**
    * Retrieves a value from the cache.
    * @async
    * @param {string | number} key - The key to retrieve the value for.
@@ -192,7 +135,7 @@ class MemcachedWrapper {
    * @throws {Error} If the key is not a string or number, or if the retrieval fails.
    */
   async get(key) {
-    this.#checkKeyValidity(key);
+    checkKey(key);
     return this.getAsync(key);
   }
 
@@ -206,10 +149,10 @@ class MemcachedWrapper {
    * @throws {Error} If the key is not a string or number, or if the data or TTL is invalid.
    */
   async set(key, data, ttl) {
-    this.#checkKeyValidity(key);
+    checkKey(key);
     if (data === undefined) throw new Error('The data to cache cannot be undefined');
 
-    return this.setAsync(key, data, this.#checkTtlValidity(ttl));
+    return this.setAsync(key, data, checkTtl(ttl));
   }
 
   /**
@@ -220,7 +163,7 @@ class MemcachedWrapper {
    * @throws {Error} If the key is not a string or number, or if the deletion fails.
    */
   async del(key) {
-    this.#checkKeyValidity(key);
+    checkKey(key);
     await this.delAsync(key);
     return 'OK';
   }
@@ -236,13 +179,13 @@ class MemcachedWrapper {
    * @returns {Promise<void>}
    */
   async hashSet(key, field, data, ttl) {
-    this.#checkKeyValidity(key);
+    checkKey(key);
     if (typeof field !== 'string') throw new Error('The field name must be a string');
-    const numericTtl = this.#checkTtlValidity(ttl);
+    const numericTtl = checkTtl(ttl);
 
     // Retrieve the existing hash from cache (single read) or initialize an empty object
     const hashString = await this.get(key);
-    const hash = hashString ? this.#parseStored(hashString) : {};
+    const hash = hashString ? parseStored(hashString) : {};
 
     hash[field] = data;
 
@@ -259,11 +202,11 @@ class MemcachedWrapper {
    * @returns {Promise<object|any|undefined>} Hash, specific field value, or undefined if not found.
    */
   async hashGet(key, field) {
-    this.#checkKeyValidity(key);
+    checkKey(key);
     const hashString = await this.get(key);
     if (!hashString) return undefined;
 
-    const hash = this.#parseStored(hashString);
+    const hash = parseStored(hashString);
     return field ? hash[field] : hash;
   }
 
@@ -279,13 +222,13 @@ class MemcachedWrapper {
    * @returns {Promise<string>} 'OK', or 'Data not found' if the hash/field is missing.
    */
   async hashDel(key, field, options = {}) {
-    this.#checkKeyValidity(key);
+    checkKey(key);
     if (!field) return this.del(key);
 
     const hashString = await this.get(key);
     if (!hashString) return 'Data not found';
 
-    const hash = this.#parseStored(hashString);
+    const hash = parseStored(hashString);
     if (hash[field] === undefined) return 'Data not found';
 
     delete hash[field];
@@ -308,12 +251,12 @@ class MemcachedWrapper {
    * @throws {Error} If the key, ttl or options are invalid.
    */
   async listSet(key, data, ttl, options = {}) {
-    this.#checkKeyValidity(key);
-    const numericTtl = this.#checkTtlValidity(ttl);
+    checkKey(key);
+    const numericTtl = checkTtl(ttl);
     const { index, push } = this.#normalizeListOptions(options, ['index', 'push']);
 
     const listString = await this.get(key);
-    const list = listString ? this.#parseStored(listString) : [];
+    const list = listString ? parseStored(listString) : [];
 
     if (index !== undefined) list[index] = data;
     else if (push) list.push(data);
@@ -333,11 +276,11 @@ class MemcachedWrapper {
    * @throws {Error} If the key or options are invalid.
    */
   async listGet(key, options = {}) {
-    this.#checkKeyValidity(key);
+    checkKey(key);
     const { index, start, end } = this.#normalizeListOptions(options, LIST_NUMERIC_OPTIONS);
 
     const listString = await this.get(key);
-    const list = listString ? this.#parseStored(listString) : undefined;
+    const list = listString ? parseStored(listString) : undefined;
 
     if (!list) return undefined;
 
@@ -363,15 +306,15 @@ class MemcachedWrapper {
    * @throws {Error} If the key, ttl or options are invalid.
    */
   async listDel(key, ttl, options = {}) {
-    this.#checkKeyValidity(key);
+    checkKey(key);
     const { index, start, end } = this.#normalizeListOptions(options, LIST_NUMERIC_OPTIONS);
 
     if (index === undefined && start === undefined && end === undefined) return this.del(key);
 
-    const numericTtl = this.#checkTtlValidity(ttl);
+    const numericTtl = checkTtl(ttl);
 
     const listString = await this.get(key);
-    const list = listString ? this.#parseStored(listString) : [];
+    const list = listString ? parseStored(listString) : [];
 
     if (!list.length) return undefined;
 
