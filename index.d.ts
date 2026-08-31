@@ -7,6 +7,27 @@ import IORedis, { RedisOptions } from 'ioredis';
  */
 export type CacheKey = string | number;
 
+/**
+ * The portable core both backends implement identically, so code written
+ * against it keeps working when the backend is swapped.
+ *
+ * Everything outside this interface is backend-specific: Memcached's simulated
+ * hashes and lists, and Redis's native commands through `.client`.
+ */
+export interface CacheCore {
+  /** Reads a value, or `undefined` when the key does not exist. */
+  get(key: CacheKey): Promise<unknown>;
+  /** Stores `data` for `ttl` seconds. `ttl` is required; `0` means no expiration. */
+  set(key: CacheKey, data: unknown, ttl: number): Promise<unknown>;
+  /** Deletes a key. Resolves to `'OK'` whether or not the key existed. */
+  del(key: CacheKey): Promise<'OK'>;
+  /**
+   * Closes the connection. Awaitable on both backends, though only Redis
+   * actually returns a promise.
+   */
+  close(): void | Promise<'OK'>;
+}
+
 /** Wrapper-level options for {@link Redis}. */
 export interface RedisWrapperOptions {
   /**
@@ -15,13 +36,27 @@ export interface RedisWrapperOptions {
    * dropped connection never crashes the process with an unhandled 'error' event.
    */
   onError?: (err: Error) => void;
+
+  /**
+   * Enforce Memcached's key rules (no whitespace, 250 characters max) on this
+   * client too. Redis accepts almost any key, so this is opt-in: turn it on to
+   * catch keys that would not survive a switch to the Memcached backend.
+   * @default false
+   */
+  strictKeys?: boolean;
 }
 
 /**
- * Thin wrapper around an `ioredis` client that guarantees an 'error' listener is
- * attached. The full ioredis API is reachable through {@link Redis.client}.
+ * Wraps an `ioredis` client with the {@link CacheCore} methods and guarantees an
+ * 'error' listener is attached. The full ioredis API — hashes, sets, pipelines,
+ * transactions — stays reachable through {@link Redis.client}.
+ *
+ * Values written through `set` are JSON-encoded and decoded again by `get`, so
+ * what you put in is what you get out. That makes the wrapper the owner of the
+ * stored format: keys written by something else are readable through `.client`,
+ * not through `get`.
  */
-export class Redis {
+export class Redis implements CacheCore {
   /**
    * @param connectionArgs Connection string or ioredis options. Omit for
    *   `127.0.0.1:6379`; an empty or whitespace-only string throws.
@@ -33,6 +68,18 @@ export class Redis {
 
   /** The underlying ioredis client. */
   readonly client: IORedis;
+
+  /** Reads a value, or `undefined` when the key does not exist. */
+  get(key: CacheKey): Promise<unknown>;
+
+  /**
+   * Stores `data` for `ttl` seconds; `0` means no expiration. A whole-second
+   * `ttl` is sent as `EX`, a fractional one as `PX`, so it is never truncated.
+   */
+  set(key: CacheKey, data: unknown, ttl: number): Promise<'OK'>;
+
+  /** Deletes a key. Resolves to `'OK'` whether or not the key existed. */
+  del(key: CacheKey): Promise<'OK'>;
 
   /** Gracefully closes the connection (`QUIT`). */
   close(callback?: (err: Error | null, res: 'OK') => void): Promise<'OK'>;
@@ -92,7 +139,7 @@ export interface ListRangeOptions {
  * are therefore **not atomic**; concurrent writers to the same key can lose an
  * update.
  */
-export class Memcached {
+export class Memcached implements CacheCore {
   /**
    * @param connectionArgs Server string, array of servers, or a server/weight
    *   map. Omit for `127.0.0.1:11211`; an empty or whitespace-only string throws.

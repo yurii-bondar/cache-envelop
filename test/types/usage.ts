@@ -3,12 +3,12 @@
  * typecheck` fails the build if the published declarations stop matching the
  * documented API, which keeps the types from silently rotting.
  */
-import { Memcached, Redis } from '../../index';
+import { CacheCore, Memcached, Redis } from '../../index';
 
 const redis = new Redis({ host: '127.0.0.1', port: 6379 }, {
   onError: (err: Error) => err.message,
 });
-const redisFromString = new Redis('127.0.0.1:6379');
+const redisFromString = new Redis('127.0.0.1:6379', { strictKeys: true });
 const redisDefault = new Redis();
 
 void redis.client.get('key');
@@ -45,5 +45,26 @@ async function exercise(): Promise<void> {
 
   memcached.close();
 }
+
+/**
+ * The point of the portable core: one function, either backend. If the two
+ * classes ever drift apart, this stops compiling.
+ */
+async function useAnyCache(cache: CacheCore): Promise<void> {
+  await cache.set('key', { any: 'value' }, 60);
+  await cache.set(42, 'by-number', 0);
+
+  const value: unknown = await cache.get('key');
+  void value;
+
+  const removed: 'OK' = await cache.del('key');
+  void removed;
+
+  await cache.close();
+}
+
+void useAnyCache(memcached);
+void useAnyCache(redis);
+void useAnyCache(redisFromString);
 
 void exercise;
