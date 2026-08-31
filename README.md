@@ -29,7 +29,7 @@ All three wrappers — `Memcached`, `Redis` and the dependency-free in-process
 On top of that core, the Memcached wrapper simulates data types Memcached does not have,
 so hashes and lists are available there too:
 ```js
-// portable core — identical on both backends
+// portable core — identical on all three backends
 get(key),
 set(key, data, ttl),
 del(key),
@@ -78,10 +78,10 @@ Install it with `npm install ioredis`.
 | `get(key)` | The stored value, or `undefined` if the key does not exist. A stored `null` comes back as `null`, so it stays distinguishable from a miss. |
 | `set(key, data, ttl)` | Stores `data` for `ttl` seconds. `ttl` is **required**; `0` means no expiration. |
 | `del(key)` | Resolves to `'OK'`, whether or not the key existed. |
-| `close()` | Closes the connection. Awaitable on both, though only Redis actually returns a promise. |
+| `close()` | Releases the backend: closes the connection, or drops every entry for `Memory`. Awaitable on all three, though only Redis actually returns a promise. |
 
 Keys may be a `string` or a `number`. Values survive the round trip unchanged — strings, numbers,
-booleans, `null`, objects and arrays all come back as they went in, on both backends.
+booleans, `null`, objects and arrays all come back as they went in, on all three backends.
 
 ```js
 const { Memcached, Redis } = require('cache-envelop');
@@ -97,7 +97,7 @@ await cacheUser(new Redis('127.0.0.1:6379'), user);
 await cacheUser(new Memory(), user); // no server needed
 ```
 
-The same validation errors are raised by both: a missing/blank key, a key that is neither a string
+The same validation errors are raised by all three: a missing/blank key, a key that is neither a string
 nor a number, `undefined` data, and a missing/non-numeric/negative `ttl`.
 
 Two things stay backend-specific by design:
@@ -323,10 +323,15 @@ The package declares `engines: { node: ">=20" }`, matching the Node versions CI 
   `ioredis` does, but it silently emits `issue` / `failure` / `reconnecting` / `remove` events that
   are easy to miss. `MemcachedWrapper` listens to all four (`console.error` by default,
   overridable via `onIssue`) so connectivity problems are visible instead of silent.
-- Cache entries written by `hashSet`/`hashGet`/`hashDel`/`listSet`/`listGet`/`listDel` are JSON
-  under the hood. If a value is corrupted (e.g. written by something other than this wrapper),
-  these methods reject with a clear `Failed to parse cached value as JSON: ...` error instead of a
-  raw `SyntaxError`.
+- **Memory**: there is no connection, so there are no connection errors — one reason it is the
+  easiest backend to write tests against.
+- **Stored values are JSON** — everything written by `Redis` and `Memory`, and everything the
+  Memcached hash/list helpers put in a key. If a value cannot be read back (it was written by
+  something other than this wrapper, or the entry is corrupted), `get` and the helpers reject with
+  a clear `Failed to parse cached value as JSON: ...` rather than a raw `SyntaxError`. Writing a
+  value JSON cannot represent — a function, a symbol, a circular structure — fails on the way in,
+  with `The data to cache must be JSON-serializable` or `Failed to serialize the value as JSON`,
+  instead of storing something broken.
 
 <a name="known-limitations"><h2>Known limitations</h2></a>
 
@@ -344,6 +349,10 @@ The package declares `engines: { node: ">=20" }`, matching the Node versions CI 
   advantage for cosmetic symmetry.
 - Even inside the core, the Redis wrapper's `get`/`set` own the stored format (JSON). Reading a key
   written by another service, or by `redis.client.set(...)` directly, must go through `.client`.
+- `Memory` is a cache for tests, local development and single-process use — not a shared one. Its
+  entries live in one process and are lost when it exits, expiration is lazy (a key written and
+  never read again holds its memory until eviction or `close()`), and `maxKeys` evicts by write
+  order rather than as an LRU. It is also unbounded unless you set `maxKeys`.
 
 <a name="testing"><h2>Testing</h2></a>
 
@@ -417,7 +426,14 @@ Additive in the same release:
 - New `Memory` backend: an in-process, dependency-free implementation of the
   [portable core](#portable-core) for tests and local development. Values are JSON-copied rather
   than stored by reference, expiration is lazy, and `maxKeys` bounds the store by write order.
-- `Redis` now implements the [portable core](#portable-core) — `get`, `set`, `del` — alongside
+- The core contract now also runs against **live Redis, Dragonfly and Memcached** servers
+  (`npm run test:integration`), not only against mocks, with a new CI job supplying all three.
+  Dragonfly is exercised through the ordinary `Redis` wrapper, since it speaks the Redis protocol.
+- `npm run test:smoke` packs the publishable tarball, installs it with no peer dependencies, and
+  checks that `require`, `Memory` and both missing-client messages behave. It runs in CI.
+
+**3.1.0 (2026-08-31) — minor, additive only:**
+- `Redis` implements the [portable core](#portable-core) — `get`, `set`, `del` — alongside
   `close`, with the same contracts, validation and error messages as `Memcached`. `.client` is
   untouched, so nothing that used the raw ioredis instance changes.
 - `Redis#set` sends a fractional `ttl` as `PX` rather than truncating it, and `ttl: 0` as a plain
