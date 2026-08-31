@@ -348,10 +348,12 @@ The package declares `engines: { node: ">=20" }`, matching the Node versions CI 
 <a name="testing"><h2>Testing</h2></a>
 
 ```bash
-npm test               # run the suite once
-npm run test:coverage  # run with a coverage report (100% lines/branches/functions/statements)
-npm run lint           # eslint (airbnb-base)
-npm run typecheck      # compile index.d.ts against test/types/usage.ts
+npm test                # unit suite, no servers needed
+npm run test:coverage   # with a coverage report (100% lines/branches/functions/statements)
+npm run lint            # eslint (airbnb-base)
+npm run typecheck       # compile index.d.ts against test/types/usage.ts
+npm run test:integration # the same contract against live servers (see below)
+npm run test:smoke      # pack, install with no peers, check the package works
 ```
 
 The suite runs fully offline: `__mocks__/ioredis.js` and `__mocks__/memcached.js` are small
@@ -361,11 +363,40 @@ tests. The ioredis mock also reproduces the server-side errors the wrapper has t
 `SET key value EX 0`, a fractional `EX`, an unknown `SET` modifier — so a test cannot pass against
 the mock and fail against a real server.
 
-`test/coreContract.test.js` runs one shared scenario against all three wrappers with
-`describe.each`, which is what turns the [portable core](#portable-core) from a promise in this
-README into something CI enforces. `Memory` matters most there: being a completely different
-implementation, it is the one that would expose the core as a description of ioredis rather than a
-real abstraction.
+The contract itself lives once, in `test/support/coreContractScenario.js`. `test/coreContract.test.js`
+runs it against all three wrappers on the mocks, and `test/integration/` runs the very same
+assertions against **live Redis, Dragonfly and Memcached** servers. A contract that drifts between
+its fast run and its realistic one is not a contract. `Memory` matters most in the fast run: being
+a completely different implementation, it is the one that would expose the core as a description of
+ioredis rather than a real abstraction.
+
+Integration backends are opt-in through environment variables, so a run degrades to whatever is
+reachable:
+
+```bash
+docker run -d -p 16379:6379 redis:7-alpine
+docker run -d -p 11211:11211 memcached:1.6-alpine
+docker run -d -p 16380:6379 --ulimit memlock=-1 docker.dragonflydb.io/dragonflydb/dragonfly
+
+INTEGRATION_REDIS_URL=redis://127.0.0.1:16379 \
+INTEGRATION_DRAGONFLY_URL=redis://127.0.0.1:16380 \
+INTEGRATION_MEMCACHED=127.0.0.1:11211 \
+  npm run test:integration
+```
+
+That run is also how [Dragonfly support](#portable-core) is verified rather than assumed: it is
+exercised through the ordinary `Redis` wrapper, because Dragonfly speaks the Redis protocol.
+
+One trap worth knowing if you extend the integration suite: Jest substitutes `__mocks__/<pkg>.js`
+for a `node_modules` package **automatically**, with no `jest.mock()` call anywhere. The
+integration file therefore calls `jest.unmock('ioredis')` and `jest.unmock('memcached')`, and
+asserts that the loaded packages are not the mocks. Without that guard the suite passes in
+milliseconds while the servers sit idle — which is exactly what it did before the guard was added.
+
+`npm run test:smoke` packs the tarball npm would publish, installs it into a throwaway project with
+`--omit=peer`, and checks that `require('cache-envelop')` works, that `Memory` is usable, and that
+each missing client reports how to install itself. Only a real install can show that `files`, the
+lazy requires and `peerDependenciesMeta` line up.
 
 <a name="changelog"><h2>Changelog</h2></a>
 

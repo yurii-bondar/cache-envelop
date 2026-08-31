@@ -20,7 +20,9 @@
     "lint": "npx eslint ./",
     "typecheck": "tsc --noEmit",
     "test": "jest",
-    "test:coverage": "jest --coverage"
+    "test:coverage": "jest --coverage",
+    "test:integration": "jest --config jest.integration.config.js",
+    "test:smoke": "node scripts/smoke-no-peers.js"
   },
   "keywords": [
     "redis",
