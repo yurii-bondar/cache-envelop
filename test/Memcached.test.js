@@ -112,6 +112,36 @@ describe('MemcachedWrapper', () => {
       );
     });
 
+    test('accepts a key of exactly 250 characters', async () => {
+      await expect(cache.get('a'.repeat(250))).resolves.toBeUndefined();
+    });
+
+    test('rejects a key containing a space, which Memcached itself would reject', async () => {
+      await expect(cache.get('a b c')).rejects.toThrow(
+        'The key must not contain whitespace characters',
+      );
+    });
+
+    test('rejects a key containing a tab or newline', async () => {
+      await expect(cache.get('a\tb')).rejects.toThrow(
+        'The key must not contain whitespace characters',
+      );
+      await expect(cache.get('a\nb')).rejects.toThrow(
+        'The key must not contain whitespace characters',
+      );
+    });
+
+    test('measures the length of the raw key, not a whitespace-stripped copy', async () => {
+      // 200 chars + 100 spaces + 49 chars = 349 characters; stripping the spaces
+      // used to bring it under the limit and let an invalid key reach the server.
+      const key = `${'x'.repeat(200)}${' '.repeat(100)}${'y'.repeat(49)}`;
+      expect(key.length).toBeGreaterThan(250);
+      await expect(cache.get(key)).rejects.toThrow('The key must not contain whitespace characters');
+      await expect(cache.get(`${'x'.repeat(200)}${'y'.repeat(51)}`)).rejects.toThrow(
+        'The key must not exceed 250 characters',
+      );
+    });
+
     test('accepts a numeric key', async () => {
       await expect(cache.get(12345)).resolves.toBeUndefined();
     });
@@ -286,14 +316,48 @@ describe('MemcachedWrapper', () => {
       await expect(cache.listGet('l1')).resolves.toEqual(['REPLACED', 'second']);
     });
 
-    test('listSet ignores a negative index and falls back to unshift', async () => {
-      await cache.listSet('l1', 'a', 60, { index: -1 });
+    test('listSet rejects a negative index instead of silently unshifting', async () => {
+      await expect(cache.listSet('l1', 'a', 60, { index: -1 })).rejects.toThrow(
+        'The "index" option must be a non-negative integer',
+      );
+    });
+
+    test('listSet rejects a non-numeric index instead of silently unshifting', async () => {
+      await expect(cache.listSet('l1', 'a', 60, { index: 'not-a-number' })).rejects.toThrow(
+        'The "index" option must be a non-negative integer',
+      );
+    });
+
+    test('listSet rejects a fractional index', async () => {
+      await expect(cache.listSet('l1', 'a', 60, { index: 1.5 })).rejects.toThrow(
+        'The "index" option must be a non-negative integer',
+      );
+    });
+
+    test('listSet accepts a numeric string index', async () => {
+      await cache.listSet('l1', 'a', 60, { push: true });
+      await cache.listSet('l1', 'REPLACED', 60, { index: '0' });
+      await expect(cache.listGet('l1')).resolves.toEqual(['REPLACED']);
+    });
+
+    test('listSet rejects unknown options', async () => {
+      await expect(cache.listSet('l1', 'a', 60, { start: 0 })).rejects.toThrow(
+        'Unknown option(s): start. Allowed option(s): index, push',
+      );
+    });
+
+    test('listSet treats null options as no options', async () => {
+      await cache.listSet('l1', 'a', 60, null);
       await expect(cache.listGet('l1')).resolves.toEqual(['a']);
     });
 
-    test('listSet ignores a non-numeric index and falls back to unshift', async () => {
-      await cache.listSet('l1', 'a', 60, { index: 'not-a-number' });
-      await expect(cache.listGet('l1')).resolves.toEqual(['a']);
+    test('listSet rejects a non-object options argument', async () => {
+      await expect(cache.listSet('l1', 'a', 60, 'push')).rejects.toThrow(
+        'The options argument must be an object',
+      );
+      await expect(cache.listSet('l1', 'a', 60, [])).rejects.toThrow(
+        'The options argument must be an object',
+      );
     });
 
     test('listGet returns undefined for a missing key', async () => {
@@ -321,9 +385,34 @@ describe('MemcachedWrapper', () => {
       await expect(cache.listGet('l1', { end: 1 })).resolves.toEqual(['a', 'b']);
     });
 
-    test('listGet falls back to the full list when options match no known key', async () => {
+    test('listGet rejects unknown options instead of silently ignoring them', async () => {
       await cache.listSet('l1', 'a', 60, { push: true });
-      await expect(cache.listGet('l1', { unrelated: true })).resolves.toEqual(['a']);
+      await expect(cache.listGet('l1', { unrelated: true })).rejects.toThrow(
+        'Unknown option(s): unrelated. Allowed option(s): index, start, end',
+      );
+    });
+
+    test('listGet rejects a negative index, matching listSet', async () => {
+      await cache.listSet('l1', 'a', 60, { push: true });
+      await expect(cache.listGet('l1', { index: -1 })).rejects.toThrow(
+        'The "index" option must be a non-negative integer',
+      );
+    });
+
+    test('listGet rejects an empty-string or boolean position', async () => {
+      await expect(cache.listGet('l1', { start: '' })).rejects.toThrow(
+        'The "start" option must be a non-negative integer',
+      );
+      await expect(cache.listGet('l1', { end: true })).rejects.toThrow(
+        'The "end" option must be a non-negative integer',
+      );
+    });
+
+    test('listGet validates options before touching the cache', async () => {
+      lastClient().forceNextError('get', new Error('connection lost'));
+      await expect(cache.listGet('l1', { index: -1 })).rejects.toThrow(
+        'The "index" option must be a non-negative integer',
+      );
     });
 
     test('listDel with no options clears the whole key', async () => {
@@ -367,10 +456,92 @@ describe('MemcachedWrapper', () => {
       await expect(cache.listGet('l1')).resolves.toEqual(['c']);
     });
 
-    test('listDel with unrecognized options clears the entire list', async () => {
+    test('listDel rejects unrecognized options instead of clearing the whole list', async () => {
       await cache.listSet('l1', 'a', 60, { push: true });
-      await cache.listDel('l1', 60, { unrelated: true });
-      await expect(cache.listGet('l1')).resolves.toEqual([]);
+      await expect(cache.listDel('l1', 60, { unrelated: true })).rejects.toThrow(
+        'Unknown option(s): unrelated. Allowed option(s): index, start, end',
+      );
+      await expect(cache.listGet('l1')).resolves.toEqual(['a']);
+    });
+
+    test('listDel rejects a typo alongside a valid option', async () => {
+      await expect(cache.listDel('l1', 60, { index: 0, idx: 1 })).rejects.toThrow(
+        'Unknown option(s): idx. Allowed option(s): index, start, end',
+      );
+    });
+
+    test('listDel treats null options as "delete the whole key"', async () => {
+      await cache.listSet('l1', 'a', 60, { push: true });
+      await expect(cache.listDel('l1', undefined, null)).resolves.toBe('OK');
+      await expect(cache.listGet('l1')).resolves.toBeUndefined();
+    });
+  });
+
+  describe('ttl is required by every method that rewrites a key', () => {
+    let cache;
+
+    beforeEach(() => {
+      cache = new MemcachedWrapper();
+    });
+
+    test('hashSet rejects a missing ttl before reading the cache', async () => {
+      lastClient().forceNextError('get', new Error('connection lost'));
+      await expect(cache.hashSet('h1', 'name', 'Alice')).rejects.toThrow(
+        'The ttl must be a non-negative number of seconds (0 means no expiration)',
+      );
+    });
+
+    test('hashSet rejects a negative ttl', async () => {
+      await expect(cache.hashSet('h1', 'name', 'Alice', -1)).rejects.toThrow(
+        'The ttl must be a non-negative number of seconds (0 means no expiration)',
+      );
+    });
+
+    test('listSet rejects a missing ttl before reading the cache', async () => {
+      lastClient().forceNextError('get', new Error('connection lost'));
+      await expect(cache.listSet('l1', 'a')).rejects.toThrow(
+        'The ttl must be a non-negative number of seconds (0 means no expiration)',
+      );
+    });
+
+    test('listSet rejects a non-numeric ttl', async () => {
+      await expect(cache.listSet('l1', 'a', 'soon')).rejects.toThrow(
+        'The ttl must be a non-negative number of seconds (0 means no expiration)',
+      );
+    });
+
+    test('listDel rejects a missing ttl when options select a subset', async () => {
+      await cache.listSet('l1', 'a', 60, { push: true });
+      await expect(cache.listDel('l1', undefined, { index: 0 })).rejects.toThrow(
+        'The ttl must be a non-negative number of seconds (0 means no expiration)',
+      );
+      await expect(cache.listGet('l1')).resolves.toEqual(['a']);
+    });
+
+    test('listDel still needs no ttl when it deletes the whole key', async () => {
+      await cache.listSet('l1', 'a', 60, { push: true });
+      await expect(cache.listDel('l1')).resolves.toBe('OK');
+    });
+
+    test('hashDel rejects a missing options.ttl when it rewrites the hash', async () => {
+      await cache.hashSet('h1', 'name', 'Alice', 60);
+      await expect(cache.hashDel('h1', 'name')).rejects.toThrow(
+        'The ttl must be a non-negative number of seconds (0 means no expiration)',
+      );
+    });
+
+    test('hashDel tolerates a null options object when it rewrites the hash', async () => {
+      await cache.hashSet('h1', 'name', 'Alice', 60);
+      await expect(cache.hashDel('h1', 'name', null)).rejects.toThrow(
+        'The ttl must be a non-negative number of seconds (0 means no expiration)',
+      );
+    });
+
+    test('ttl=0 is accepted everywhere as "no expiration"', async () => {
+      await cache.hashSet('h1', 'name', 'Alice', 0);
+      await cache.listSet('l1', 'a', 0, { push: true });
+      await expect(cache.hashDel('h1', 'name', { ttl: 0 })).resolves.toBe('OK');
+      await expect(cache.listDel('l1', 0, { index: 0 })).resolves.toBeDefined();
     });
   });
 
