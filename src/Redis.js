@@ -4,6 +4,7 @@ const {
   checkKey,
   checkKeyBasics,
   checkTtl,
+  stringifyForCache,
   parseStored,
 } = require('./validators');
 
@@ -88,29 +89,6 @@ class RedisWrapper {
   }
 
   /**
-   * Encodes a value for storage. Redis stores strings, so an object written
-   * without encoding would come back as '[object Object]'.
-   * @param {any} data
-   * @returns {string}
-   */
-  // eslint-disable-next-line class-methods-use-this
-  #serialize(data) {
-    if (data === undefined) throw new Error('The data to cache cannot be undefined');
-
-    let serialized;
-    try {
-      serialized = JSON.stringify(data);
-    } catch (err) {
-      throw new Error(`Failed to serialize the value as JSON: ${err.message}`);
-    }
-
-    // JSON.stringify returns undefined for functions and symbols.
-    if (serialized === undefined) throw new Error('The data to cache must be JSON-serializable');
-
-    return serialized;
-  }
-
-  /**
    * Retrieves a value from the cache.
    * @async
    * @param {string | number} key - The key to retrieve the value for.
@@ -136,7 +114,7 @@ class RedisWrapper {
    */
   async set(key, data, ttl) {
     const stringKey = this.#checkKey(key);
-    const serialized = this.#serialize(data);
+    const serialized = stringifyForCache(data);
     const numericTtl = checkTtl(ttl);
 
     // `SET key value EX 0` is an error in Redis, so "no expiration" is a plain SET.

@@ -9,6 +9,7 @@
 > [Connection configs](#connection-configs)<br>
 > [Connecting Redis](#connecting-redis)<br>
 > [Connecting Memcached](#connecting-memcached)<br>
+> [In-process cache](#in-process-cache)<br>
 > [Memcached API reference](#memcached-api-reference)<br>
 > [TypeScript](#typescript)<br>
 > [Error handling](#error-handling)<br>
@@ -20,8 +21,9 @@
 Services often use Memcached and Redis at the same time.
 This package is a helper wrapper to make it easier to work with them.
 
-Both wrappers implement the same [portable core](#portable-core) — `get`, `set`, `del`, `close` —
-so plain key/value code reads the same whichever backend is behind it.
+All three wrappers — `Memcached`, `Redis` and the dependency-free in-process
+[`Memory`](#in-process-cache) — implement the same [portable core](#portable-core): `get`, `set`,
+`del`, `close`. Plain key/value code reads the same whichever backend is behind it.
 
 On top of that core, the Memcached wrapper simulates data types Memcached does not have,
 so hashes and lists are available there too:
@@ -45,7 +47,7 @@ For hashes, lists and every other native structure on the Redis side, use the ra
 
 <a name="portable-core"><h2>Portable core</h2></a>
 
-`Memcached` and `Redis` implement four methods with identical, test-enforced behavior:
+`Memcached`, `Redis` and `Memory` implement four methods with identical, test-enforced behavior:
 
 | Method | Contract |
 | --- | --- |
@@ -68,6 +70,7 @@ async function cacheUser(cache, user) {
 
 await cacheUser(new Memcached('127.0.0.1:11211'), user);
 await cacheUser(new Redis('127.0.0.1:6379'), user);
+await cacheUser(new Memory(), user); // no server needed
 ```
 
 The same validation errors are raised by both: a missing/blank key, a key that is neither a string
@@ -75,9 +78,9 @@ nor a number, `undefined` data, and a missing/non-numeric/negative `ttl`.
 
 Two things stay backend-specific by design:
 
-- **Key rules.** Redis accepts almost any key; Memcached's text protocol does not (250 characters,
-  no whitespace). Redis therefore enforces only the portable minimum unless you opt in with
-  `strictKeys: true` — see [Connecting Redis](#connecting-redis).
+- **Key rules.** Redis and `Memory` accept almost any key; Memcached's text protocol does not
+  (250 characters, no whitespace). The first two therefore enforce only the portable minimum
+  unless you opt in with `strictKeys: true`.
 - **Value storage.** The Redis wrapper JSON-encodes on write and decodes on read, which makes it
   the owner of the stored format: keys written by something else are readable through
   `.client`, not through `get`.
@@ -176,6 +179,41 @@ const memcached = new Memcached(config.memcached.servers, {
 - Implemented simulation of working with hashes and lists — see the
   [Memcached API reference](#memcached-api-reference) below for exact signatures and behavior.
 
+<a name="in-process-cache"><h2>In-process cache</h2></a>
+
+`Memory` implements the [portable core](#portable-core) with a `Map`. No server, no connection
+string, **no dependencies** — so the same code you ship can run in tests and local development
+without Docker:
+
+```js
+const { Memory } = require('cache-envelop');
+
+const cache = new Memory();
+await cache.set('user:1', { name: 'Alice' }, 3600);
+await cache.get('user:1'); // { name: 'Alice' }
+```
+
+- **Values are copied, not shared.** They go through the same JSON encoding as the other backends
+  instead of being stored by reference. That costs a copy, and it is the point: a value that
+  survives here survives in production, a value JSON cannot represent fails here the same way it
+  would there, and mutating the object you passed in — or the one `get` handed back — cannot reach
+  into the cache.
+- **Expiration is lazy.** An entry is dropped when a read finds it past its deadline; there are no
+  timers to leak or to keep the event loop alive. A key written and never read again therefore
+  holds its memory until eviction or `close()`.
+- **`maxKeys` bounds the store** (default `0`, unbounded). Once exceeded, the least recently
+  *written* entry is dropped. This is write-order eviction, not an LRU — reads do not make a key
+  any safer. For a hot L1 cache that needs real LRU, use a dedicated library.
+- `close()` drops every entry; there is no connection to tear down.
+- `size` reports how many entries are held, including any that have expired but not yet been read.
+
+```js
+const cache = new Memory({ maxKeys: 10_000, strictKeys: true });
+```
+
+`strictKeys` applies Memcached's key rules, which is worth turning on in tests: it catches keys
+that would work here but fail against a real Memcached server.
+
 <a name="memcached-api-reference"><h2>Memcached API reference</h2></a>
 
 | Method | Description |
@@ -233,11 +271,12 @@ async function cacheUser(cache: CacheCore, user: User): Promise<unknown> {
   return cache.get(`user:${user.id}`);
 }
 
-await cacheUser(memcached, user); // both compile
+await cacheUser(memcached, user); // all three compile
 await cacheUser(redis, user);
+await cacheUser(new Memory(), user);
 ```
 
-Both classes are declared `implements CacheCore`, so the two cannot drift apart without
+All three classes are declared `implements CacheCore`, so they cannot drift apart without
 `npm run typecheck` failing.
 
 `npm run typecheck` compiles the declarations against a usage fixture
@@ -268,7 +307,7 @@ The package declares `engines: { node: ">=20" }`, matching the Node versions CI 
   race and one update can be lost. Fine for low-contention use (per-request caches, mostly-read
   data); if you need strong consistency under concurrent writers on the same key, use Redis (or a
   server-side lock) instead.
-- The two wrappers are interchangeable only for the [portable core](#portable-core)
+- The wrappers are interchangeable only for the [portable core](#portable-core)
   (`get`/`set`/`del`/`close`). Beyond it they intentionally differ: `MemcachedWrapper` adds
   simulated hashes and lists, while `RedisWrapper` exposes the raw `ioredis` client rather than
   re-implementing every Redis command. Redis has native `HSET`/`LPUSH`/`LRANGE` that are atomic
@@ -293,13 +332,18 @@ tests. The ioredis mock also reproduces the server-side errors the wrapper has t
 `SET key value EX 0`, a fractional `EX`, an unknown `SET` modifier — so a test cannot pass against
 the mock and fail against a real server.
 
-`test/coreContract.test.js` runs one shared scenario against both wrappers with `describe.each`,
-which is what turns the [portable core](#portable-core) from a promise in this README into
-something CI enforces.
+`test/coreContract.test.js` runs one shared scenario against all three wrappers with
+`describe.each`, which is what turns the [portable core](#portable-core) from a promise in this
+README into something CI enforces. `Memory` matters most there: being a completely different
+implementation, it is the one that would expose the core as a description of ioredis rather than a
+real abstraction.
 
 <a name="changelog"><h2>Changelog</h2></a>
 
 **Unreleased — minor, additive only:**
+- New `Memory` backend: an in-process, dependency-free implementation of the
+  [portable core](#portable-core) for tests and local development. Values are JSON-copied rather
+  than stored by reference, expiration is lazy, and `maxKeys` bounds the store by write order.
 - `Redis` now implements the [portable core](#portable-core) — `get`, `set`, `del` — alongside
   `close`, with the same contracts, validation and error messages as `Memcached`. `.client` is
   untouched, so nothing that used the raw ioredis instance changes.

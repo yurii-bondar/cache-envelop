@@ -5,6 +5,7 @@ const MemcachedMockClient = require('memcached');
 const RedisMockClient = require('ioredis');
 const MemcachedWrapper = require('../src/Memcached');
 const RedisWrapper = require('../src/Redis');
+const MemoryWrapper = require('../src/Memory');
 
 /**
  * One scenario, both backends. This is what makes "portable core" a claim the
@@ -12,25 +13,31 @@ const RedisWrapper = require('../src/Redis');
  * and `close` must behave identically on Memcached and Redis, so swapping one
  * for the other cannot change how calling code reads.
  *
- * Anything the two backends deliberately do differently — Memcached's hash and
- * list emulation, Redis's key rules, what `close()` returns — belongs in the
+ * Anything a backend deliberately does differently — Memcached's hash and list
+ * emulation, Redis's key rules, what `close()` returns — belongs in the
  * per-backend suites, not here.
+ *
+ * `Memory` earns its place here twice over: it is the backend users run their
+ * own tests against, and being a completely different implementation it is the
+ * one that would expose the core as a description of ioredis rather than a real
+ * abstraction. It has no transport, hence no client to fail on command.
  */
 const backends = [
   ['Memcached', () => {
     const cache = new MemcachedWrapper();
     const { instances } = MemcachedMockClient;
     return { cache, client: instances[instances.length - 1] };
-  }],
+  }, { hasClient: true }],
   ['Redis', () => {
     const cache = new RedisWrapper();
     return { cache, client: cache.client };
-  }],
+  }, { hasClient: true }],
+  ['Memory', () => ({ cache: new MemoryWrapper(), client: null }), { hasClient: false }],
 ];
 
 const TTL_ERROR = 'The ttl must be a non-negative number of seconds (0 means no expiration)';
 
-describe.each(backends)('portable cache core: %s', (_name, createCache) => {
+describe.each(backends)('portable cache core: %s', (_name, createCache, capabilities) => {
   let cache;
   let client;
 
@@ -130,7 +137,7 @@ describe.each(backends)('portable cache core: %s', (_name, createCache) => {
     });
   });
 
-  describe('error propagation', () => {
+  (capabilities.hasClient ? describe : describe.skip)('error propagation', () => {
     test.each([
       ['get', (c) => c.get('k')],
       ['set', (c) => c.set('k', 'v', 60)],

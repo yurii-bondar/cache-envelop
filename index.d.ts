@@ -85,6 +85,53 @@ export class Redis implements CacheCore {
   close(callback?: (err: Error | null, res: 'OK') => void): Promise<'OK'>;
 }
 
+/** Constructor options for {@link Memory}. */
+export interface MemoryOptions {
+  /**
+   * Maximum number of entries to keep; `0` means unbounded. Once exceeded, the
+   * least recently written entry is dropped. This is write-order eviction, not
+   * an LRU: reads do not make a key any safer.
+   * @default 0
+   */
+  maxKeys?: number;
+
+  /**
+   * Enforce Memcached's key rules (no whitespace, 250 characters max). Useful
+   * in tests to catch keys that would not survive a switch to a real backend.
+   * @default false
+   */
+  strictKeys?: boolean;
+}
+
+/**
+ * An in-process implementation of {@link CacheCore}, backed by a `Map`. Needs no
+ * server and no dependencies, which makes it the default choice for tests and
+ * local development.
+ *
+ * Values go through the same JSON encoding as the other backends rather than
+ * being stored by reference, so a value that survives here survives in
+ * production and a caller mutating what `get` returned cannot reach into the
+ * cache. Entries expire lazily, when a read finds them past their deadline.
+ */
+export class Memory implements CacheCore {
+  constructor(options?: MemoryOptions | null);
+
+  /** Entries currently held, including any that expired but have not been read. */
+  readonly size: number;
+
+  /** Reads a value, or `undefined` when the key is missing or expired. */
+  get(key: CacheKey): Promise<unknown>;
+
+  /** Stores `data` for `ttl` seconds; `0` means no expiration. */
+  set(key: CacheKey, data: unknown, ttl: number): Promise<'OK'>;
+
+  /** Deletes a key. Resolves to `'OK'` whether or not the key existed. */
+  del(key: CacheKey): Promise<'OK'>;
+
+  /** Drops every entry. There is no connection to tear down. */
+  close(): void;
+}
+
 /**
  * Minimal structural type for the underlying `memcached` client. The `memcached`
  * package ships no type declarations of its own; install `@types/memcached` if

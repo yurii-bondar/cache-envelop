@@ -71,6 +71,30 @@ function checkTtl(ttl) {
 }
 
 /**
+ * Encodes a value for storage. Backends that persist strings need this, and
+ * running every backend through the same encoder is what makes a value survive
+ * the round trip identically no matter which one is behind the wrapper.
+ * @param {any} data
+ * @returns {string}
+ * @throws {Error} If the value is undefined or JSON cannot represent it.
+ */
+function stringifyForCache(data) {
+  if (data === undefined) throw new Error('The data to cache cannot be undefined');
+
+  let serialized;
+  try {
+    serialized = JSON.stringify(data);
+  } catch (err) {
+    throw new Error(`Failed to serialize the value as JSON: ${err.message}`);
+  }
+
+  // JSON.stringify returns undefined for functions and symbols.
+  if (serialized === undefined) throw new Error('The data to cache must be JSON-serializable');
+
+  return serialized;
+}
+
+/**
  * Parses a JSON string previously stored by a wrapper, raising a clear error
  * instead of letting a corrupted cache entry throw a cryptic SyntaxError deep
  * inside a hash/list operation.
@@ -92,5 +116,6 @@ module.exports = {
   checkKeyBasics,
   checkKey,
   checkTtl,
+  stringifyForCache,
   parseStored,
 };
