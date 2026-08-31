@@ -409,7 +409,7 @@ lazy requires and `peerDependenciesMeta` line up.
 
 <a name="changelog"><h2>Changelog</h2></a>
 
-**Unreleased — major, contains the breaking changes described below:**
+**4.0.0 (2026-08-31) — major, contains the breaking changes described below:**
 - **Breaking:** `ioredis` and `memcached` moved from `dependencies` to **optional
   `peerDependencies`**. Installing this package no longer installs either client, so a project
   using only Redis stops dragging in a Memcached client and vice versa — and the `Memory` backend
