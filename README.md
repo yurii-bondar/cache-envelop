@@ -1,6 +1,7 @@
 # Wrapper for working with caching services (Memcached, Redis)
 
 [![CI](https://github.com/yurii-bondar/cache-envelop/actions/workflows/ci.yml/badge.svg)](https://github.com/yurii-bondar/cache-envelop/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/cache-envelop.svg)](https://www.npmjs.com/package/cache-envelop)
 
 > #### Content
 > [About](#about)<br>
