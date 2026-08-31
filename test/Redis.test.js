@@ -206,6 +206,11 @@ describe('RedisWrapper', () => {
   });
 
   describe('close', () => {
+    test('does not patch a close method onto the ioredis client', () => {
+      const redis = new RedisWrapper();
+      expect(redis.client.close).toBeUndefined();
+    });
+
     test('delegates to client.quit', async () => {
       const redis = new RedisWrapper();
       const quitSpy = jest.spyOn(redis.client, 'quit');
@@ -214,15 +219,6 @@ describe('RedisWrapper', () => {
       redis.close(callback);
 
       expect(quitSpy).toHaveBeenCalledWith(callback);
-    });
-
-    test('is also reachable as client.close (bound)', () => {
-      const redis = new RedisWrapper();
-      const quitSpy = jest.spyOn(redis.client, 'quit');
-
-      redis.client.close();
-
-      expect(quitSpy).toHaveBeenCalled();
     });
   });
 });

@@ -56,7 +56,6 @@ class RedisWrapper {
     this.connectionArgs = connectionArgs;
     this.#strictKeys = Boolean(options && options.strictKeys);
     this.#client = new IORedis(this.connectionArgs);
-    this.#client.close = this.close.bind(this);
     this.#client.on('error', (options && options.onError) || defaultErrorHandler);
   }
 

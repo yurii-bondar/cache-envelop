@@ -169,9 +169,6 @@ await redis.client.hset('user:1:meta', 'seen', Date.now()); // native ioredis
   `strictKeys` applies Memcached's key rules (no whitespace, 250 characters max) to this client
   too. Redis itself has no such limits, so it is off by default; turn it on to catch keys that
   would not survive a switch to the Memcached backend.
-- **Deprecated:** the underlying client also answers to `redis.client.close()`, which forwards to
-  the wrapper's `close()`. It predates the wrapper having an API of its own and will be removed in
-  the next major — call `redis.close()` instead.
 
 <a name="connecting-memcached"><h2>Connecting Memcached</h2></a>
 ```js
@@ -372,7 +369,7 @@ real abstraction.
 
 <a name="changelog"><h2>Changelog</h2></a>
 
-**Unreleased — major, contains one breaking change described below:**
+**Unreleased — major, contains the breaking changes described below:**
 - **Breaking:** `ioredis` and `memcached` moved from `dependencies` to **optional
   `peerDependencies`**. Installing this package no longer installs either client, so a project
   using only Redis stops dragging in a Memcached client and vice versa — and the `Memory` backend
@@ -380,6 +377,10 @@ real abstraction.
   `npm install memcached`. Each is now `require`d when its wrapper is constructed rather than at
   import time, so a missing client raises a message naming the package to install instead of
   breaking `require('cache-envelop')` for everyone.
+- **Breaking:** removed `redis.client.close()`. The wrapper used to patch a `close` alias onto the
+  ioredis instance, which predates it having an API of its own; monkey-patching a third-party
+  object also risks colliding with whatever ioredis adds later. Call `redis.close()` instead — it
+  is unchanged, and `.client` is now exactly the ioredis instance with nothing bolted on.
 
 Additive in the same release:
 - New `Memory` backend: an in-process, dependency-free implementation of the
@@ -395,8 +396,6 @@ Additive in the same release:
 - New exported type `CacheCore`; both classes are declared `implements CacheCore`.
 - Validation moved to `src/validators.js` so both backends enforce one contract from one place.
 - New `test/coreContract.test.js` runs one scenario against both backends.
-- **Deprecated:** `redis.client.close()`. Call `redis.close()`; the monkey-patched alias will be
-  removed in the next major.
 
 **3.0.0 (2026-08-31) — major, contains breaking behavior changes described below:**
 - `Memcached`: keys containing whitespace are now rejected up front. Memcached's text protocol is
