@@ -9,6 +9,7 @@
 > [Connecting Redis](#connecting-redis)<br>
 > [Connecting Memcached](#connecting-memcached)<br>
 > [Memcached API reference](#memcached-api-reference)<br>
+> [TypeScript](#typescript)<br>
 > [Error handling](#error-handling)<br>
 > [Known limitations](#known-limitations)<br>
 > [Testing](#testing)<br>
@@ -92,10 +93,18 @@ const memcached = new Memcached(config.memcached.servers, {
 
 - Supports all possible formats of connection options that it supports [npm package memcached](https://www.npmjs.com/package/memcached)
 - Client methods are implemented as asynchronous: `get(key)`, `set(key, data, ttl)`, `del(key)`
-- Keys may be a `string` or a `number`, up to 250 characters (Memcached's own limit); empty,
-  whitespace-only or over-length keys throw a descriptive `Error` synchronously.
-- `set(key, data, ttl)` requires a non-negative numeric `ttl`; use `ttl: 0` for "no expiration"
-  (standard Memcached semantics), not `undefined`.
+- Keys may be a `string` or a `number` and are validated against Memcached's own protocol
+  constraints: at most 250 characters, and **no whitespace anywhere** (the text protocol is
+  space-delimited, so the server rejects `'user 1'` itself). Empty, whitespace-containing and
+  over-length keys throw a descriptive `Error` synchronously — the length is measured on the key
+  as it will actually be sent, not on a whitespace-stripped copy.
+- **Every method that writes a key requires a non-negative numeric `ttl`** — `set`, `hashSet`,
+  `listSet`, and `hashDel`/`listDel` when they rewrite the remainder of a hash/list. Use `ttl: 0`
+  for "no expiration" (standard Memcached semantics), never `undefined`: silently reusing a
+  default would reset the expiration of an existing entry behind the caller's back.
+- The `options` object of `listSet`/`listGet`/`listDel` is **validated, not best-effort**: unknown
+  keys and negative/fractional/non-numeric positions throw. A typo such as `{ idx: 0 }` used to
+  fall through to "no position given" and wipe the entire list.
 - Implemented simulation of working with hashes and lists — see the
   [Memcached API reference](#memcached-api-reference) below for exact signatures and behavior.
 
@@ -104,14 +113,14 @@ const memcached = new Memcached(config.memcached.servers, {
 | Method | Description |
 | --- | --- |
 | `get(key)` | Returns the raw stored value, or `undefined` if the key does not exist. |
-| `set(key, data, ttl)` | Stores `data` under `key` for `ttl` seconds (`0` = no expiration). |
+| `set(key, data, ttl)` | Stores `data` under `key` for `ttl` seconds (`0` = no expiration). `ttl` is required. |
 | `del(key)` | Deletes `key`. Always resolves to `'OK'`. |
-| `hashSet(key, field, data, ttl)` | Sets/updates a single `field` in the hash stored at `key`, creating the hash if it doesn't exist yet, and rewrites it with the given `ttl`. |
+| `hashSet(key, field, data, ttl)` | Sets/updates a single `field` in the hash stored at `key`, creating the hash if it doesn't exist yet, and rewrites it with the given `ttl` (**required**). |
 | `hashGet(key, [field])` | Returns the whole hash, or a single `field`'s value. Returns `undefined` if the key (or a JSON-null hash) doesn't exist. |
 | `hashDel(key, [field], [options])` | Without `field`, deletes the whole key. With `field`, removes just that field and rewrites the hash using `options.ttl` (**required** in that case — omitting it throws a validation error rather than silently corrupting the TTL). Returns `'Data not found'` if the key or field doesn't exist. |
-| `listSet(key, data, ttl, [options])` | Inserts `data` into the list at `key`. `options.index` (any integer `>= 0`, including `0`) overwrites that slot; `options.push: true` appends; otherwise the default is `unshift` (prepend). |
-| `listGet(key, [options])` | Without options, returns the full list (or `undefined`). `options.index` (`>= 0`) returns one item; `options.start`/`options.end` (both `>= 0`, inclusive) return a slice. `0` is a valid index/start/end and is handled correctly. |
-| `listDel(key, ttl, [options])` | Without options, deletes the whole key. With `options.index`, `options.start`/`options.end`, removes just that item/range and rewrites the list with `ttl`. |
+| `listSet(key, data, ttl, [options])` | Inserts `data` into the list at `key`. `ttl` is **required**. `options.index` (a non-negative integer, `0` included) overwrites that slot; `options.push: true` appends; otherwise the default is `unshift` (prepend). Any other option key, or a negative/fractional/non-numeric `index`, throws. |
+| `listGet(key, [options])` | Without options, returns the full list (or `undefined`). `options.index` returns one item; `options.start`/`options.end` (inclusive) return a slice. All three must be non-negative integers (`0` included); unknown option keys throw. |
+| `listDel(key, ttl, [options])` | Without options, deletes the whole key (no `ttl` needed). With `options.index` or `options.start`/`options.end`, removes just that item/range and rewrites the list with `ttl` (**required** in that case). Unknown option keys throw instead of clearing the list. Resolves to `undefined` if the stored list is empty. |
 
 ```js
 await memcached.hashSet('user:1', 'name', 'Alice', 3600);
@@ -123,7 +132,32 @@ await memcached.listSet('queue', 'first', 3600, { push: true });
 await memcached.listSet('queue', 'second', 3600, { push: true });
 await memcached.listGet('queue', { index: 0 }); // 'first' — index 0 works as expected
 await memcached.listGet('queue', { start: 0, end: 0 }); // ['first']
+
+// Validated, not best-effort — these throw instead of doing something surprising:
+await memcached.get('user 1');                       // key contains whitespace
+await memcached.listSet('queue', 'x', 3600, { index: -1 }); // index must be >= 0
+await memcached.listDel('queue', 3600, { idx: 0 });  // unknown option (used to clear the list)
+await memcached.listSet('queue', 'x');               // ttl is required
 ```
+
+<a name="typescript"><h2>TypeScript</h2></a>
+
+The package ships its own declarations (`index.d.ts`), so no `@types/...` install is needed:
+
+```ts
+import { Memcached, Redis } from 'cache-envelop';
+
+const redis = new Redis({ host: '127.0.0.1', port: 6379 });
+await redis.client.get('key');           // full ioredis typings via `.client`
+
+const memcached = new Memcached(['127.0.0.1:11211'], { retries: 5 });
+await memcached.hashSet('user:1', 'name', 'Alice', 3600);
+const name = await memcached.hashGet('user:1', 'name'); // unknown — narrow it yourself
+```
+
+`npm run typecheck` compiles the declarations against a usage fixture
+(`test/types/usage.ts`) in CI, so the published types cannot drift from the implementation.
+The package declares `engines: { node: ">=20" }`, matching the Node versions CI tests.
 
 <a name="error-handling"><h2>Error handling</h2></a>
 
@@ -156,8 +190,10 @@ await memcached.listGet('queue', { start: 0, end: 0 }); // ['first']
 <a name="testing"><h2>Testing</h2></a>
 
 ```bash
-npm test            # run the suite once
+npm test               # run the suite once
 npm run test:coverage  # run with a coverage report (100% lines/branches/functions/statements)
+npm run lint           # eslint (airbnb-base)
+npm run typecheck      # compile index.d.ts against test/types/usage.ts
 ```
 
 The suite runs fully offline: `__mocks__/ioredis.js` and `__mocks__/memcached.js` are small
@@ -166,6 +202,22 @@ the next call to fail), so no live Redis/Memcached server is required to run or 
 tests.
 
 <a name="changelog"><h2>Changelog</h2></a>
+
+**Unreleased — major, contains breaking behavior changes described below:**
+- `Memcached`: keys containing whitespace are now rejected up front. Memcached's text protocol is
+  space-delimited and the server rejects such keys itself, so they used to fail only at runtime.
+- `Memcached`: the 250-character key limit is now measured on the raw key. Whitespace was stripped
+  before the check, so a 349-character key with spaces in it passed validation.
+- `Memcached#listSet` / `listGet` / `listDel`: `options` is validated. Unknown keys and
+  negative / fractional / non-numeric `index`/`start`/`end` now throw. Previously a typo like
+  `listDel(key, ttl, { idx: 0 })` fell through to the "no options" branch and **cleared the whole
+  list**, a negative `index` silently became an `unshift` in `listSet`, and `listGet` accepted a
+  negative index that `listSet` rejected.
+- `Memcached#listSet` / `listDel` / `hashSet`: `ttl` is validated up front and is documented as
+  required, matching `set` and `hashDel`. It was already effectively required (the internal `set`
+  threw), but JSDoc marked it optional and the error surfaced only after a needless cache read.
+- Added TypeScript declarations (`index.d.ts`), an `engines` field (`node >= 20`), and a
+  `npm run typecheck` step in CI.
 
 **2.0.0 (2026-07-31) — major, contains breaking behavior changes described below:**
 - `Memcached`: numeric keys (documented as supported) no longer throw a `TypeError`.

@@ -1,6 +1,9 @@
 const { promisify } = require('util');
 const Memcached = require('memcached');
 
+const LIST_NUMERIC_OPTIONS = ['index', 'start', 'end'];
+const TTL_ERROR = 'The ttl must be a non-negative number of seconds (0 means no expiration)';
+
 /**
  * Default handler for the underlying memcached client's diagnostic events
  * ('issue', 'failure', 'reconnecting', 'remove'). Unlike ioredis, the
@@ -81,17 +84,88 @@ class MemcachedWrapper {
     return this.#options;
   }
 
+  /**
+   * Validates a cache key against Memcached's own protocol constraints: keys are
+   * limited to 250 bytes and may not contain whitespace (the text protocol is
+   * space-delimited, so a key with a space is rejected by the server itself).
+   * Both checks run against the key as it will actually be sent, so a key that
+   * passes here is a key the server will accept.
+   * @param {string | number} key
+   */
   #checkKeyValidity(key) {
     if (key === undefined || key === null) throw new Error('The key cannot be empty');
     if (typeof key !== 'string' && typeof key !== 'number') {
       throw new Error('The key must be a string or a number');
     }
 
-    const trimmedKey = String(key).replace(/\s/g, '');
-    if (!trimmedKey) throw new Error('The key cannot be empty');
-    if (trimmedKey.length > this.#maxLengthKey) {
+    const stringKey = String(key);
+    if (!stringKey.trim()) throw new Error('The key cannot be empty');
+    if (/\s/.test(stringKey)) {
+      throw new Error('The key must not contain whitespace characters');
+    }
+    if (stringKey.length > this.#maxLengthKey) {
       throw new Error(`The key must not exceed ${this.#maxLengthKey} characters`);
     }
+  }
+
+  /**
+   * Validates a TTL and returns it as a number. Every method that writes a key
+   * back to the cache requires one: silently reusing a default would reset the
+   * expiration of an existing entry without the caller noticing.
+   * @param {number} ttl
+   * @returns {number}
+   */
+  // eslint-disable-next-line class-methods-use-this
+  #checkTtlValidity(ttl) {
+    const numericTtl = Number(ttl);
+    if (ttl === undefined || Number.isNaN(numericTtl) || numericTtl < 0) {
+      throw new Error(TTL_ERROR);
+    }
+    return numericTtl;
+  }
+
+  /**
+   * Validates and normalizes the `options` object of the list helpers. Unknown
+   * keys and out-of-range positions are rejected rather than ignored: a typo
+   * such as `{ idx: 0 }` used to fall through to "no position given" and wipe
+   * the whole list, and a negative index behaved differently in every method.
+   * @param {Object} options - Raw options object supplied by the caller.
+   * @param {string[]} allowedKeys - Option names this method understands.
+   * @returns {Object} Normalized options; numeric positions coerced to numbers.
+   */
+  // eslint-disable-next-line class-methods-use-this
+  #normalizeListOptions(options, allowedKeys) {
+    if (options === undefined || options === null) return {};
+    if (typeof options !== 'object' || Array.isArray(options)) {
+      throw new Error('The options argument must be an object');
+    }
+
+    const unknownKeys = Object.keys(options).filter((key) => !allowedKeys.includes(key));
+    if (unknownKeys.length) {
+      throw new Error(
+        `Unknown option(s): ${unknownKeys.join(', ')}. Allowed option(s): ${allowedKeys.join(', ')}`,
+      );
+    }
+
+    const normalized = {};
+
+    LIST_NUMERIC_OPTIONS.filter((key) => allowedKeys.includes(key)).forEach((key) => {
+      const value = options[key];
+      if (value === undefined) return;
+
+      const isNumeric = typeof value === 'number'
+        || (typeof value === 'string' && value.trim() !== '');
+      const numericValue = isNumeric ? Number(value) : NaN;
+
+      if (!Number.isInteger(numericValue) || numericValue < 0) {
+        throw new Error(`The "${key}" option must be a non-negative integer`);
+      }
+      normalized[key] = numericValue;
+    });
+
+    if (allowedKeys.includes('push')) normalized.push = Boolean(options.push);
+
+    return normalized;
   }
 
   /**
@@ -135,12 +209,7 @@ class MemcachedWrapper {
     this.#checkKeyValidity(key);
     if (data === undefined) throw new Error('The data to cache cannot be undefined');
 
-    const numericTtl = Number(ttl);
-    if (ttl === undefined || Number.isNaN(numericTtl) || numericTtl < 0) {
-      throw new Error('The ttl must be a non-negative number of seconds (0 means no expiration)');
-    }
-
-    return this.setAsync(key, data, numericTtl);
+    return this.setAsync(key, data, this.#checkTtlValidity(ttl));
   }
 
   /**
@@ -163,12 +232,13 @@ class MemcachedWrapper {
    * @param {string} key - The key for the hash.
    * @param {string} field - The field name within the hash to set or update.
    * @param {any} data - The data to store for the specified field in the hash.
-   * @param {number} ttl - The time-to-live (TTL) for the cached data in seconds.
+   * @param {number} ttl - Required TTL in seconds for the rewritten hash (0 = no expiration).
    * @returns {Promise<void>}
    */
   async hashSet(key, field, data, ttl) {
     this.#checkKeyValidity(key);
     if (typeof field !== 'string') throw new Error('The field name must be a string');
+    const numericTtl = this.#checkTtlValidity(ttl);
 
     // Retrieve the existing hash from cache (single read) or initialize an empty object
     const hashString = await this.get(key);
@@ -177,7 +247,7 @@ class MemcachedWrapper {
     hash[field] = data;
 
     // Store the updated hash back in the cache with the specified TTL
-    await this.set(key, JSON.stringify(hash), ttl);
+    await this.set(key, JSON.stringify(hash), numericTtl);
   }
 
   /**
@@ -204,7 +274,8 @@ class MemcachedWrapper {
    * @param {string} key - The key for the hash.
    * @param {string} [field] - The specific field to delete (optional).
    * @param {Object} [options] - Optional configurations.
-   * @param {number} [options.ttl] - The TTL to re-apply when rewriting the hash after a removal.
+   * @param {number} options.ttl - TTL to re-apply when rewriting the hash; required when
+   *   `field` is given, since removing a field rewrites the whole key.
    * @returns {Promise<string>} 'OK', or 'Data not found' if the hash/field is missing.
    */
   async hashDel(key, field, options = {}) {
@@ -218,7 +289,7 @@ class MemcachedWrapper {
     if (hash[field] === undefined) return 'Data not found';
 
     delete hash[field];
-    await this.set(key, JSON.stringify(hash), options.ttl);
+    await this.set(key, JSON.stringify(hash), (options || {}).ttl);
     return 'OK';
   }
 
@@ -229,99 +300,87 @@ class MemcachedWrapper {
    *
    * @param {string} key - The cache key where the list is stored.
    * @param {*} data - The data to add or update in the list.
-   * @param {number} [ttl] - The time-to-live in seconds for the key in the cache.
+   * @param {number} ttl - Required TTL in seconds for the rewritten list (0 = no expiration).
    * @param {Object} [options] - Additional options for the operation.
-   * @param {number} [options.index] - The index of the element to update (0 is valid).
+   * @param {number} [options.index] - Index of the element to update; a non-negative integer.
    * @param {boolean} [options.push=false] - Whether to append the data to the list.
-   * @returns {Promise<void>} - Resolves after updating the cache.
-   * @throws {Error} If the key is invalid.
+   * @returns {Promise<any>} - Resolves after updating the cache.
+   * @throws {Error} If the key, ttl or options are invalid.
    */
   async listSet(key, data, ttl, options = {}) {
     this.#checkKeyValidity(key);
+    const numericTtl = this.#checkTtlValidity(ttl);
+    const { index, push } = this.#normalizeListOptions(options, ['index', 'push']);
 
     const listString = await this.get(key);
     const list = listString ? this.#parseStored(listString) : [];
 
-    const { index, push = false } = options;
-    const itemIndex = Number(index);
-    const hasValidIndex = index !== undefined && !Number.isNaN(itemIndex) && itemIndex >= 0;
-
-    if (hasValidIndex) list[itemIndex] = data;
+    if (index !== undefined) list[index] = data;
     else if (push) list.push(data);
     else list.unshift(data);
 
-    return this.set(key, JSON.stringify(list), ttl);
+    return this.set(key, JSON.stringify(list), numericTtl);
   }
 
   /**
    * Retrieves a list from memcached and optionally allows slicing or retrieving specific indices.
    * @param {string} key - The key used to retrieve the list from memcached.
    * @param {Object} [options={}] - Optional parameters for slicing or indexing the list.
-   * @param {number} [options.index] - Specific index of the list to retrieve (0 is valid).
-   * @param {number} [options.start] - Start index for slicing the list (0 is valid).
-   * @param {number} [options.end] - End index for slicing the list (inclusive, 0 is valid).
+   * @param {number} [options.index] - Index of the item to retrieve; a non-negative integer.
+   * @param {number} [options.start] - Start index for slicing; a non-negative integer.
+   * @param {number} [options.end] - End index for slicing (inclusive); a non-negative integer.
    * @returns {Promise<any|undefined>} - The full list, a slice, or a specific item, per options.
+   * @throws {Error} If the key or options are invalid.
    */
   async listGet(key, options = {}) {
     this.#checkKeyValidity(key);
+    const { index, start, end } = this.#normalizeListOptions(options, LIST_NUMERIC_OPTIONS);
 
     const listString = await this.get(key);
     const list = listString ? this.#parseStored(listString) : undefined;
 
     if (!list) return undefined;
-    if (!options || !Object.keys(options).length) return list;
 
-    const { index, start, end } = options;
-    const itemIndex = Number(index);
-    const startIndex = Number(start);
-    const endIndex = Number(end);
-
-    const hasIndex = index !== undefined && !Number.isNaN(itemIndex);
-    const hasStart = start !== undefined && !Number.isNaN(startIndex);
-    const hasEnd = end !== undefined && !Number.isNaN(endIndex);
-
-    if (hasIndex) return list[itemIndex];
-    if (hasStart && hasEnd) return list.slice(startIndex, endIndex + 1);
-    if (hasStart) return list.slice(startIndex);
-    if (hasEnd) return list.slice(0, endIndex + 1);
+    if (index !== undefined) return list[index];
+    if (start !== undefined && end !== undefined) return list.slice(start, end + 1);
+    if (start !== undefined) return list.slice(start);
+    if (end !== undefined) return list.slice(0, end + 1);
     return list;
   }
 
   /**
    * Deletes items from a list stored in the cache based on the given options.
-   * If no options are provided, the entire list will be cleared.
+   * If no options are provided, the entire key is deleted.
    *
    * @param {string} key - The cache key where the list is stored.
-   * @param {number} [ttl] - The time-to-live in seconds for the key in the cache.
+   * @param {number} [ttl] - TTL in seconds for the rewritten list; required whenever
+   *   `options` selects a subset (the remaining list is written back).
    * @param {Object} [options={}] - Options to specify what to delete.
-   * @param {number} [options.index] - The index of the item to delete (0 is valid).
-   * @param {number} [options.start] - The start index for deleting a range of items (0 is valid).
-   * @param {number} [options.end] - The end index for deleting a range of items (0 is valid).
-   * @returns {Promise} - Resolves after updating the cache.
-   * @throws {Error} If the key is invalid or the operation fails.
+   * @param {number} [options.index] - Index of the item to delete; a non-negative integer.
+   * @param {number} [options.start] - Start index of the range to delete; a non-negative integer.
+   * @param {number} [options.end] - End index of the range to delete; a non-negative integer.
+   * @returns {Promise<any>} - Resolves after updating the cache.
+   * @throws {Error} If the key, ttl or options are invalid.
    */
   async listDel(key, ttl, options = {}) {
     this.#checkKeyValidity(key);
+    const { index, start, end } = this.#normalizeListOptions(options, LIST_NUMERIC_OPTIONS);
 
-    if (!options || !Object.keys(options).length) return this.del(key);
+    if (index === undefined && start === undefined && end === undefined) return this.del(key);
+
+    const numericTtl = this.#checkTtlValidity(ttl);
 
     const listString = await this.get(key);
     const list = listString ? this.#parseStored(listString) : [];
 
     if (!list.length) return undefined;
 
-    const { index, start, end } = options;
-    const itemIndex = Number(index);
-    const startIndex = Number(start);
-    const endIndex = Number(end);
+    if (index !== undefined) list.splice(index, 1);
+    else if (start !== undefined && end !== undefined) list.splice(start, end - start + 1);
+    else if (start !== undefined) list.splice(start);
+    else list.splice(0, end + 1);
 
-    if (itemIndex >= 0) list.splice(itemIndex, 1);
-    else if (startIndex >= 0 && endIndex >= 0) list.splice(startIndex, endIndex - startIndex + 1);
-    else if (startIndex >= 0) list.splice(startIndex);
-    else if (endIndex >= 0) list.splice(0, endIndex + 1);
-    else list.length = 0;
-
-    return this.set(key, JSON.stringify(list), ttl);
+    return this.set(key, JSON.stringify(list), numericTtl);
   }
 
   /**
