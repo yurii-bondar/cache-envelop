@@ -1,5 +1,4 @@
-const Redis = require('ioredis');
-
+const loadClient = require('./loadClient');
 const {
   checkKey,
   checkKeyBasics,
@@ -52,9 +51,11 @@ class RedisWrapper {
    *   opt-in: turn it on to catch keys that would not survive a switch to the Memcached backend.
    */
   constructor(connectionArgs, options = {}) {
+    const IORedis = loadClient('ioredis', 'RedisWrapper');
+
     this.connectionArgs = connectionArgs;
     this.#strictKeys = Boolean(options && options.strictKeys);
-    this.#client = new Redis(this.connectionArgs);
+    this.#client = new IORedis(this.connectionArgs);
     this.#client.close = this.close.bind(this);
     this.#client.on('error', (options && options.onError) || defaultErrorHandler);
   }

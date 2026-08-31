@@ -5,6 +5,7 @@
 
 > #### Content
 > [About](#about)<br>
+> [Install](#install)<br>
 > [Portable core](#portable-core)<br>
 > [Connection configs](#connection-configs)<br>
 > [Connecting Redis](#connecting-redis)<br>
@@ -44,6 +45,29 @@ listDel(key, ttl, options = {})
 ```
 For hashes, lists and every other native structure on the Redis side, use the raw client:
 `redis.client.hset(...)`. See [Known limitations](#known-limitations).
+
+<a name="install"><h2>Install</h2></a>
+
+```bash
+npm install cache-envelop
+```
+
+The client packages are **optional peer dependencies**, so install the one you actually use:
+
+```bash
+npm install cache-envelop ioredis     # Redis (or Valkey, Dragonfly, …)
+npm install cache-envelop memcached   # Memcached
+npm install cache-envelop             # Memory only — nothing else needed
+```
+
+Requiring the package pulls in neither client; each is loaded when its wrapper is first
+constructed. Build a wrapper whose client is missing and you get a message saying which package to
+install, rather than a crash on import that hits everyone regardless of the backend they use:
+
+```
+cache-envelop: RedisWrapper requires the "ioredis" package, which is not installed.
+Install it with `npm install ioredis`.
+```
 
 <a name="portable-core"><h2>Portable core</h2></a>
 
@@ -279,6 +303,14 @@ await cacheUser(new Memory(), user);
 All three classes are declared `implements CacheCore`, so they cannot drift apart without
 `npm run typecheck` failing.
 
+One caveat for the `Memory`-only case: `index.d.ts` imports ioredis's types to give `.client` its
+full typing, and TypeScript resolves that import even if you never touch the `Redis` class. With
+`skipLibCheck: true` — the default from `tsc --init`, and what most projects run — this is a
+non-issue. With `skipLibCheck: false` and ioredis absent you will see
+`TS2307: Cannot find module 'ioredis'`; install `ioredis` (or add `@types` resolution for it) to
+silence it. The alternative would be to type `.client` loosely for everyone, which costs more than
+it saves.
+
 `npm run typecheck` compiles the declarations against a usage fixture
 (`test/types/usage.ts`) in CI, so the published types cannot drift from the implementation.
 The package declares `engines: { node: ">=20" }`, matching the Node versions CI tests.
@@ -340,7 +372,16 @@ real abstraction.
 
 <a name="changelog"><h2>Changelog</h2></a>
 
-**Unreleased — minor, additive only:**
+**Unreleased — major, contains one breaking change described below:**
+- **Breaking:** `ioredis` and `memcached` moved from `dependencies` to **optional
+  `peerDependencies`**. Installing this package no longer installs either client, so a project
+  using only Redis stops dragging in a Memcached client and vice versa — and the `Memory` backend
+  needs neither. Add the client you use to your own dependencies: `npm install ioredis` or
+  `npm install memcached`. Each is now `require`d when its wrapper is constructed rather than at
+  import time, so a missing client raises a message naming the package to install instead of
+  breaking `require('cache-envelop')` for everyone.
+
+Additive in the same release:
 - New `Memory` backend: an in-process, dependency-free implementation of the
   [portable core](#portable-core) for tests and local development. Values are JSON-copied rather
   than stored by reference, expiration is lazy, and `maxKeys` bounds the store by write order.
