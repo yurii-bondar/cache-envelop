@@ -20,7 +20,9 @@
     "lint": "npx eslint ./",
     "typecheck": "tsc --noEmit",
     "test": "jest",
-    "test:coverage": "jest --coverage"
+    "test:coverage": "jest --coverage",
+    "test:integration": "jest --config jest.integration.config.js",
+    "test:smoke": "node scripts/smoke-no-peers.js"
   },
   "keywords": [
     "redis",
@@ -42,12 +44,22 @@
     "eslint": "^8.57.1",
     "eslint-config-airbnb-base": "^15.0.0",
     "eslint-plugin-import": "^2.31.0",
+    "ioredis": "^5.4.1",
     "jest": "^30.4.2",
+    "memcached": "^2.2.2",
     "semantic-release": "^25.0.9",
     "typescript": "^5.9.3"
   },
-  "dependencies": {
+  "peerDependencies": {
     "ioredis": "^5.4.1",
     "memcached": "^2.2.2"
+  },
+  "peerDependenciesMeta": {
+    "ioredis": {
+      "optional": true
+    },
+    "memcached": {
+      "optional": true
+    }
   }
 }

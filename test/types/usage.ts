@@ -3,7 +3,7 @@
  * typecheck` fails the build if the published declarations stop matching the
  * documented API, which keeps the types from silently rotting.
  */
-import { CacheCore, Memcached, Redis } from '../../index';
+import { CacheCore, Memcached, Memory, Redis } from '../../index';
 
 const redis = new Redis({ host: '127.0.0.1', port: 6379 }, {
   onError: (err: Error) => err.message,
@@ -63,7 +63,13 @@ async function useAnyCache(cache: CacheCore): Promise<void> {
   await cache.close();
 }
 
+const memory = new Memory();
+const boundedMemory = new Memory({ maxKeys: 500, strictKeys: true });
+void boundedMemory.size;
+
 void useAnyCache(memcached);
+void useAnyCache(memory);
+void useAnyCache(boundedMemory);
 void useAnyCache(redis);
 void useAnyCache(redisFromString);
 

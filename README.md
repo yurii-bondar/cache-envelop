@@ -5,10 +5,12 @@
 
 > #### Content
 > [About](#about)<br>
+> [Install](#install)<br>
 > [Portable core](#portable-core)<br>
 > [Connection configs](#connection-configs)<br>
 > [Connecting Redis](#connecting-redis)<br>
 > [Connecting Memcached](#connecting-memcached)<br>
+> [In-process cache](#in-process-cache)<br>
 > [Memcached API reference](#memcached-api-reference)<br>
 > [TypeScript](#typescript)<br>
 > [Error handling](#error-handling)<br>
@@ -20,8 +22,9 @@
 Services often use Memcached and Redis at the same time.
 This package is a helper wrapper to make it easier to work with them.
 
-Both wrappers implement the same [portable core](#portable-core) — `get`, `set`, `del`, `close` —
-so plain key/value code reads the same whichever backend is behind it.
+All three wrappers — `Memcached`, `Redis` and the dependency-free in-process
+[`Memory`](#in-process-cache) — implement the same [portable core](#portable-core): `get`, `set`,
+`del`, `close`. Plain key/value code reads the same whichever backend is behind it.
 
 On top of that core, the Memcached wrapper simulates data types Memcached does not have,
 so hashes and lists are available there too:
@@ -43,9 +46,32 @@ listDel(key, ttl, options = {})
 For hashes, lists and every other native structure on the Redis side, use the raw client:
 `redis.client.hset(...)`. See [Known limitations](#known-limitations).
 
+<a name="install"><h2>Install</h2></a>
+
+```bash
+npm install cache-envelop
+```
+
+The client packages are **optional peer dependencies**, so install the one you actually use:
+
+```bash
+npm install cache-envelop ioredis     # Redis (or Valkey, Dragonfly, …)
+npm install cache-envelop memcached   # Memcached
+npm install cache-envelop             # Memory only — nothing else needed
+```
+
+Requiring the package pulls in neither client; each is loaded when its wrapper is first
+constructed. Build a wrapper whose client is missing and you get a message saying which package to
+install, rather than a crash on import that hits everyone regardless of the backend they use:
+
+```
+cache-envelop: RedisWrapper requires the "ioredis" package, which is not installed.
+Install it with `npm install ioredis`.
+```
+
 <a name="portable-core"><h2>Portable core</h2></a>
 
-`Memcached` and `Redis` implement four methods with identical, test-enforced behavior:
+`Memcached`, `Redis` and `Memory` implement four methods with identical, test-enforced behavior:
 
 | Method | Contract |
 | --- | --- |
@@ -68,6 +94,7 @@ async function cacheUser(cache, user) {
 
 await cacheUser(new Memcached('127.0.0.1:11211'), user);
 await cacheUser(new Redis('127.0.0.1:6379'), user);
+await cacheUser(new Memory(), user); // no server needed
 ```
 
 The same validation errors are raised by both: a missing/blank key, a key that is neither a string
@@ -75,9 +102,9 @@ nor a number, `undefined` data, and a missing/non-numeric/negative `ttl`.
 
 Two things stay backend-specific by design:
 
-- **Key rules.** Redis accepts almost any key; Memcached's text protocol does not (250 characters,
-  no whitespace). Redis therefore enforces only the portable minimum unless you opt in with
-  `strictKeys: true` — see [Connecting Redis](#connecting-redis).
+- **Key rules.** Redis and `Memory` accept almost any key; Memcached's text protocol does not
+  (250 characters, no whitespace). The first two therefore enforce only the portable minimum
+  unless you opt in with `strictKeys: true`.
 - **Value storage.** The Redis wrapper JSON-encodes on write and decodes on read, which makes it
   the owner of the stored format: keys written by something else are readable through
   `.client`, not through `get`.
@@ -142,9 +169,6 @@ await redis.client.hset('user:1:meta', 'seen', Date.now()); // native ioredis
   `strictKeys` applies Memcached's key rules (no whitespace, 250 characters max) to this client
   too. Redis itself has no such limits, so it is off by default; turn it on to catch keys that
   would not survive a switch to the Memcached backend.
-- **Deprecated:** the underlying client also answers to `redis.client.close()`, which forwards to
-  the wrapper's `close()`. It predates the wrapper having an API of its own and will be removed in
-  the next major — call `redis.close()` instead.
 
 <a name="connecting-memcached"><h2>Connecting Memcached</h2></a>
 ```js
@@ -175,6 +199,41 @@ const memcached = new Memcached(config.memcached.servers, {
   fall through to "no position given" and wipe the entire list.
 - Implemented simulation of working with hashes and lists — see the
   [Memcached API reference](#memcached-api-reference) below for exact signatures and behavior.
+
+<a name="in-process-cache"><h2>In-process cache</h2></a>
+
+`Memory` implements the [portable core](#portable-core) with a `Map`. No server, no connection
+string, **no dependencies** — so the same code you ship can run in tests and local development
+without Docker:
+
+```js
+const { Memory } = require('cache-envelop');
+
+const cache = new Memory();
+await cache.set('user:1', { name: 'Alice' }, 3600);
+await cache.get('user:1'); // { name: 'Alice' }
+```
+
+- **Values are copied, not shared.** They go through the same JSON encoding as the other backends
+  instead of being stored by reference. That costs a copy, and it is the point: a value that
+  survives here survives in production, a value JSON cannot represent fails here the same way it
+  would there, and mutating the object you passed in — or the one `get` handed back — cannot reach
+  into the cache.
+- **Expiration is lazy.** An entry is dropped when a read finds it past its deadline; there are no
+  timers to leak or to keep the event loop alive. A key written and never read again therefore
+  holds its memory until eviction or `close()`.
+- **`maxKeys` bounds the store** (default `0`, unbounded). Once exceeded, the least recently
+  *written* entry is dropped. This is write-order eviction, not an LRU — reads do not make a key
+  any safer. For a hot L1 cache that needs real LRU, use a dedicated library.
+- `close()` drops every entry; there is no connection to tear down.
+- `size` reports how many entries are held, including any that have expired but not yet been read.
+
+```js
+const cache = new Memory({ maxKeys: 10_000, strictKeys: true });
+```
+
+`strictKeys` applies Memcached's key rules, which is worth turning on in tests: it catches keys
+that would work here but fail against a real Memcached server.
 
 <a name="memcached-api-reference"><h2>Memcached API reference</h2></a>
 
@@ -233,12 +292,21 @@ async function cacheUser(cache: CacheCore, user: User): Promise<unknown> {
   return cache.get(`user:${user.id}`);
 }
 
-await cacheUser(memcached, user); // both compile
+await cacheUser(memcached, user); // all three compile
 await cacheUser(redis, user);
+await cacheUser(new Memory(), user);
 ```
 
-Both classes are declared `implements CacheCore`, so the two cannot drift apart without
+All three classes are declared `implements CacheCore`, so they cannot drift apart without
 `npm run typecheck` failing.
+
+One caveat for the `Memory`-only case: `index.d.ts` imports ioredis's types to give `.client` its
+full typing, and TypeScript resolves that import even if you never touch the `Redis` class. With
+`skipLibCheck: true` — the default from `tsc --init`, and what most projects run — this is a
+non-issue. With `skipLibCheck: false` and ioredis absent you will see
+`TS2307: Cannot find module 'ioredis'`; install `ioredis` (or add `@types` resolution for it) to
+silence it. The alternative would be to type `.client` loosely for everyone, which costs more than
+it saves.
 
 `npm run typecheck` compiles the declarations against a usage fixture
 (`test/types/usage.ts`) in CI, so the published types cannot drift from the implementation.
@@ -268,7 +336,7 @@ The package declares `engines: { node: ">=20" }`, matching the Node versions CI 
   race and one update can be lost. Fine for low-contention use (per-request caches, mostly-read
   data); if you need strong consistency under concurrent writers on the same key, use Redis (or a
   server-side lock) instead.
-- The two wrappers are interchangeable only for the [portable core](#portable-core)
+- The wrappers are interchangeable only for the [portable core](#portable-core)
   (`get`/`set`/`del`/`close`). Beyond it they intentionally differ: `MemcachedWrapper` adds
   simulated hashes and lists, while `RedisWrapper` exposes the raw `ioredis` client rather than
   re-implementing every Redis command. Redis has native `HSET`/`LPUSH`/`LRANGE` that are atomic
@@ -280,10 +348,12 @@ The package declares `engines: { node: ">=20" }`, matching the Node versions CI 
 <a name="testing"><h2>Testing</h2></a>
 
 ```bash
-npm test               # run the suite once
-npm run test:coverage  # run with a coverage report (100% lines/branches/functions/statements)
-npm run lint           # eslint (airbnb-base)
-npm run typecheck      # compile index.d.ts against test/types/usage.ts
+npm test                # unit suite, no servers needed
+npm run test:coverage   # with a coverage report (100% lines/branches/functions/statements)
+npm run lint            # eslint (airbnb-base)
+npm run typecheck       # compile index.d.ts against test/types/usage.ts
+npm run test:integration # the same contract against live servers (see below)
+npm run test:smoke      # pack, install with no peers, check the package works
 ```
 
 The suite runs fully offline: `__mocks__/ioredis.js` and `__mocks__/memcached.js` are small
@@ -293,13 +363,60 @@ tests. The ioredis mock also reproduces the server-side errors the wrapper has t
 `SET key value EX 0`, a fractional `EX`, an unknown `SET` modifier — so a test cannot pass against
 the mock and fail against a real server.
 
-`test/coreContract.test.js` runs one shared scenario against both wrappers with `describe.each`,
-which is what turns the [portable core](#portable-core) from a promise in this README into
-something CI enforces.
+The contract itself lives once, in `test/support/coreContractScenario.js`. `test/coreContract.test.js`
+runs it against all three wrappers on the mocks, and `test/integration/` runs the very same
+assertions against **live Redis, Dragonfly and Memcached** servers. A contract that drifts between
+its fast run and its realistic one is not a contract. `Memory` matters most in the fast run: being
+a completely different implementation, it is the one that would expose the core as a description of
+ioredis rather than a real abstraction.
+
+Integration backends are opt-in through environment variables, so a run degrades to whatever is
+reachable:
+
+```bash
+docker run -d -p 16379:6379 redis:7-alpine
+docker run -d -p 11211:11211 memcached:1.6-alpine
+docker run -d -p 16380:6379 --ulimit memlock=-1 docker.dragonflydb.io/dragonflydb/dragonfly
+
+INTEGRATION_REDIS_URL=redis://127.0.0.1:16379 \
+INTEGRATION_DRAGONFLY_URL=redis://127.0.0.1:16380 \
+INTEGRATION_MEMCACHED=127.0.0.1:11211 \
+  npm run test:integration
+```
+
+That run is also how [Dragonfly support](#portable-core) is verified rather than assumed: it is
+exercised through the ordinary `Redis` wrapper, because Dragonfly speaks the Redis protocol.
+
+One trap worth knowing if you extend the integration suite: Jest substitutes `__mocks__/<pkg>.js`
+for a `node_modules` package **automatically**, with no `jest.mock()` call anywhere. The
+integration file therefore calls `jest.unmock('ioredis')` and `jest.unmock('memcached')`, and
+asserts that the loaded packages are not the mocks. Without that guard the suite passes in
+milliseconds while the servers sit idle — which is exactly what it did before the guard was added.
+
+`npm run test:smoke` packs the tarball npm would publish, installs it into a throwaway project with
+`--omit=peer`, and checks that `require('cache-envelop')` works, that `Memory` is usable, and that
+each missing client reports how to install itself. Only a real install can show that `files`, the
+lazy requires and `peerDependenciesMeta` line up.
 
 <a name="changelog"><h2>Changelog</h2></a>
 
-**Unreleased — minor, additive only:**
+**Unreleased — major, contains the breaking changes described below:**
+- **Breaking:** `ioredis` and `memcached` moved from `dependencies` to **optional
+  `peerDependencies`**. Installing this package no longer installs either client, so a project
+  using only Redis stops dragging in a Memcached client and vice versa — and the `Memory` backend
+  needs neither. Add the client you use to your own dependencies: `npm install ioredis` or
+  `npm install memcached`. Each is now `require`d when its wrapper is constructed rather than at
+  import time, so a missing client raises a message naming the package to install instead of
+  breaking `require('cache-envelop')` for everyone.
+- **Breaking:** removed `redis.client.close()`. The wrapper used to patch a `close` alias onto the
+  ioredis instance, which predates it having an API of its own; monkey-patching a third-party
+  object also risks colliding with whatever ioredis adds later. Call `redis.close()` instead — it
+  is unchanged, and `.client` is now exactly the ioredis instance with nothing bolted on.
+
+Additive in the same release:
+- New `Memory` backend: an in-process, dependency-free implementation of the
+  [portable core](#portable-core) for tests and local development. Values are JSON-copied rather
+  than stored by reference, expiration is lazy, and `maxKeys` bounds the store by write order.
 - `Redis` now implements the [portable core](#portable-core) — `get`, `set`, `del` — alongside
   `close`, with the same contracts, validation and error messages as `Memcached`. `.client` is
   untouched, so nothing that used the raw ioredis instance changes.
@@ -310,8 +427,6 @@ something CI enforces.
 - New exported type `CacheCore`; both classes are declared `implements CacheCore`.
 - Validation moved to `src/validators.js` so both backends enforce one contract from one place.
 - New `test/coreContract.test.js` runs one scenario against both backends.
-- **Deprecated:** `redis.client.close()`. Call `redis.close()`; the monkey-patched alias will be
-  removed in the next major.
 
 **3.0.0 (2026-08-31) — major, contains breaking behavior changes described below:**
 - `Memcached`: keys containing whitespace are now rejected up front. Memcached's text protocol is

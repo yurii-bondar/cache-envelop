@@ -1,6 +1,8 @@
 module.exports = {
   testEnvironment: 'node',
   testMatch: ['**/test/**/*.test.js'],
+  // Integration tests need live servers and run from jest.integration.config.js.
+  testPathIgnorePatterns: ['/node_modules/', '/test/integration/'],
   collectCoverageFrom: ['src/**/*.js'],
   coverageThreshold: {
     global: {

@@ -1,6 +1,6 @@
 const { promisify } = require('util');
-const Memcached = require('memcached');
 
+const loadClient = require('./loadClient');
 const { checkKey, checkTtl, parseStored } = require('./validators');
 
 const LIST_NUMERIC_OPTIONS = ['index', 'start', 'end'];
@@ -36,9 +36,11 @@ class MemcachedWrapper {
    * @param {Function} [options.onIssue] - Called on 'issue'/'failure'/'reconnecting'/'remove'.
    */
   constructor(connectionArgs, options = {}) {
+    const MemcachedClient = loadClient('memcached', 'MemcachedWrapper');
+
     this.connectionArgs = connectionArgs;
     this.options = options;
-    this.#client = new Memcached(this.connectionArgs, this.options);
+    this.#client = new MemcachedClient(this.connectionArgs, this.options);
 
     const onIssue = (options && options.onIssue) || defaultIssueHandler;
     ['issue', 'failure', 'reconnecting', 'remove'].forEach((event) => {
