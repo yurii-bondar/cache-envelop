@@ -5,6 +5,7 @@
 
 > #### Content
 > [About](#about)<br>
+> [Portable core](#portable-core)<br>
 > [Connection configs](#connection-configs)<br>
 > [Connecting Redis](#connecting-redis)<br>
 > [Connecting Memcached](#connecting-memcached)<br>
@@ -18,12 +19,20 @@
 <a name="about"><h2>About</h2></a>
 Services often use Memcached and Redis at the same time.
 This package is a helper wrapper to make it easier to work with them.
-It also extends the ability to work with Memcached, by simulating support for data types,
-such as hash and list, available methods for them:
+
+Both wrappers implement the same [portable core](#portable-core) — `get`, `set`, `del`, `close` —
+so plain key/value code reads the same whichever backend is behind it.
+
+On top of that core, the Memcached wrapper simulates data types Memcached does not have,
+so hashes and lists are available there too:
 ```js
+// portable core — identical on both backends
 get(key),
 set(key, data, ttl),
 del(key),
+close(),
+
+// Memcached only: simulated hash and list types
 hashSet(key, field, data, ttl),
 hashGet(key, field),
 hashDel(key, field, options),
@@ -31,6 +40,47 @@ listSet(key, data, ttl, options = {}),
 listGet(key, options = {}),
 listDel(key, ttl, options = {})
 ```
+For hashes, lists and every other native structure on the Redis side, use the raw client:
+`redis.client.hset(...)`. See [Known limitations](#known-limitations).
+
+<a name="portable-core"><h2>Portable core</h2></a>
+
+`Memcached` and `Redis` implement four methods with identical, test-enforced behavior:
+
+| Method | Contract |
+| --- | --- |
+| `get(key)` | The stored value, or `undefined` if the key does not exist. A stored `null` comes back as `null`, so it stays distinguishable from a miss. |
+| `set(key, data, ttl)` | Stores `data` for `ttl` seconds. `ttl` is **required**; `0` means no expiration. |
+| `del(key)` | Resolves to `'OK'`, whether or not the key existed. |
+| `close()` | Closes the connection. Awaitable on both, though only Redis actually returns a promise. |
+
+Keys may be a `string` or a `number`. Values survive the round trip unchanged — strings, numbers,
+booleans, `null`, objects and arrays all come back as they went in, on both backends.
+
+```js
+const { Memcached, Redis } = require('cache-envelop');
+
+// The same function works with either one.
+async function cacheUser(cache, user) {
+  await cache.set(`user:${user.id}`, user, 3600);
+  return cache.get(`user:${user.id}`);
+}
+
+await cacheUser(new Memcached('127.0.0.1:11211'), user);
+await cacheUser(new Redis('127.0.0.1:6379'), user);
+```
+
+The same validation errors are raised by both: a missing/blank key, a key that is neither a string
+nor a number, `undefined` data, and a missing/non-numeric/negative `ttl`.
+
+Two things stay backend-specific by design:
+
+- **Key rules.** Redis accepts almost any key; Memcached's text protocol does not (250 characters,
+  no whitespace). Redis therefore enforces only the portable minimum unless you opt in with
+  `strictKeys: true` — see [Connecting Redis](#connecting-redis).
+- **Value storage.** The Redis wrapper JSON-encodes on write and decodes on read, which makes it
+  the owner of the stored format: keys written by something else are readable through
+  `.client`, not through `get`.
 
 <a name="connection-configs"><h2>Connection configs</h2></a>
 ```js
@@ -63,10 +113,21 @@ module.exports = {
 const config = require('config')
 const { Redis } = require('cache-envelop');
 
-const redis = new Redis(config.redis).client;
+const redis = new Redis(config.redis);
+
+await redis.set('user:1', { name: 'Alice' }, 3600); // portable core
+await redis.client.hset('user:1:meta', 'seen', Date.now()); // native ioredis
 ```
 - Supports all possible formats of connection options that it supports [npm package ioredis](https://www.npmjs.com/package/ioredis)
-- All methods and arguments implemented in the [npm package ioredis](https://www.npmjs.com/package/ioredis) are available
+- Implements the [portable core](#portable-core): `get`, `set`, `del`, `close`
+- All methods and arguments implemented in the [npm package ioredis](https://www.npmjs.com/package/ioredis)
+  remain available through `.client` — the wrapper adds to ioredis, it does not hide it
+- `set` sends a whole-second `ttl` as `EX` and a fractional one as `PX`, so a `ttl` of `1.5` is
+  1500 ms rather than being truncated to 1 second. `ttl: 0` is sent as a plain `SET`, since
+  `SET key value EX 0` is an error in Redis.
+- Values are JSON-encoded on write and decoded on read, so objects survive the round trip.
+  A value that JSON cannot represent (a function, a symbol, a circular structure) throws a
+  descriptive error instead of being silently stored as `'[object Object]'`.
 - Passing an empty/blank connection string (or `null`) throws immediately instead of silently
   falling back to `127.0.0.1:6379` — a misconfigured connection should fail loudly, not connect
   to the wrong host. Omitting the argument entirely still uses that default.
@@ -74,9 +135,16 @@ const redis = new Redis(config.redis).client;
   ```js
   const redis = new Redis(config.redis, {
     onError: (err) => logger.error('Redis connection error', err),
+    strictKeys: true,
   });
   ```
-  See [Error handling](#error-handling) for why this matters.
+  `onError` — see [Error handling](#error-handling) for why this matters.
+  `strictKeys` applies Memcached's key rules (no whitespace, 250 characters max) to this client
+  too. Redis itself has no such limits, so it is off by default; turn it on to catch keys that
+  would not survive a switch to the Memcached backend.
+- **Deprecated:** the underlying client also answers to `redis.client.close()`, which forwards to
+  the wrapper's `close()`. It predates the wrapper having an API of its own and will be removed in
+  the next major — call `redis.close()` instead.
 
 <a name="connecting-memcached"><h2>Connecting Memcached</h2></a>
 ```js
@@ -92,7 +160,7 @@ const memcached = new Memcached(config.memcached.servers, {
 ```
 
 - Supports all possible formats of connection options that it supports [npm package memcached](https://www.npmjs.com/package/memcached)
-- Client methods are implemented as asynchronous: `get(key)`, `set(key, data, ttl)`, `del(key)`
+- Implements the [portable core](#portable-core): `get`, `set`, `del`, `close` — all asynchronous
 - Keys may be a `string` or a `number` and are validated against Memcached's own protocol
   constraints: at most 250 characters, and **no whitespace anywhere** (the text protocol is
   space-delimited, so the server rejects `'user 1'` itself). Empty, whitespace-containing and
@@ -155,6 +223,23 @@ await memcached.hashSet('user:1', 'name', 'Alice', 3600);
 const name = await memcached.hashGet('user:1', 'name'); // unknown — narrow it yourself
 ```
 
+`CacheCore` is exported for code that should not care which backend it gets:
+
+```ts
+import { CacheCore } from 'cache-envelop';
+
+async function cacheUser(cache: CacheCore, user: User): Promise<unknown> {
+  await cache.set(`user:${user.id}`, user, 3600);
+  return cache.get(`user:${user.id}`);
+}
+
+await cacheUser(memcached, user); // both compile
+await cacheUser(redis, user);
+```
+
+Both classes are declared `implements CacheCore`, so the two cannot drift apart without
+`npm run typecheck` failing.
+
 `npm run typecheck` compiles the declarations against a usage fixture
 (`test/types/usage.ts`) in CI, so the published types cannot drift from the implementation.
 The package declares `engines: { node: ">=20" }`, matching the Node versions CI tests.
@@ -183,9 +268,14 @@ The package declares `engines: { node: ">=20" }`, matching the Node versions CI 
   race and one update can be lost. Fine for low-contention use (per-request caches, mostly-read
   data); if you need strong consistency under concurrent writers on the same key, use Redis (or a
   server-side lock) instead.
-- `RedisWrapper` exposes the raw `ioredis` client (`.client`) rather than re-implementing every
-  Redis command, so its API intentionally differs from `MemcachedWrapper`'s custom method set — the
-  two are not drop-in replacements for each other.
+- The two wrappers are interchangeable only for the [portable core](#portable-core)
+  (`get`/`set`/`del`/`close`). Beyond it they intentionally differ: `MemcachedWrapper` adds
+  simulated hashes and lists, while `RedisWrapper` exposes the raw `ioredis` client rather than
+  re-implementing every Redis command. Redis has native `HSET`/`LPUSH`/`LRANGE` that are atomic
+  and faster than anything an emulation layer could offer, so wrapping them would trade a real
+  advantage for cosmetic symmetry.
+- Even inside the core, the Redis wrapper's `get`/`set` own the stored format (JSON). Reading a key
+  written by another service, or by `redis.client.set(...)` directly, must go through `.client`.
 
 <a name="testing"><h2>Testing</h2></a>
 
@@ -199,11 +289,31 @@ npm run typecheck      # compile index.d.ts against test/types/usage.ts
 The suite runs fully offline: `__mocks__/ioredis.js` and `__mocks__/memcached.js` are small
 in-memory stand-ins for the real clients (get/set/del backed by a `Map`, plus the ability to force
 the next call to fail), so no live Redis/Memcached server is required to run or contribute to the
-tests.
+tests. The ioredis mock also reproduces the server-side errors the wrapper has to design around —
+`SET key value EX 0`, a fractional `EX`, an unknown `SET` modifier — so a test cannot pass against
+the mock and fail against a real server.
+
+`test/coreContract.test.js` runs one shared scenario against both wrappers with `describe.each`,
+which is what turns the [portable core](#portable-core) from a promise in this README into
+something CI enforces.
 
 <a name="changelog"><h2>Changelog</h2></a>
 
-**Unreleased — major, contains breaking behavior changes described below:**
+**Unreleased — minor, additive only:**
+- `Redis` now implements the [portable core](#portable-core) — `get`, `set`, `del` — alongside
+  `close`, with the same contracts, validation and error messages as `Memcached`. `.client` is
+  untouched, so nothing that used the raw ioredis instance changes.
+- `Redis#set` sends a fractional `ttl` as `PX` rather than truncating it, and `ttl: 0` as a plain
+  `SET` (`EX 0` is an error in Redis). Values are JSON-encoded on write and decoded on read.
+- New `Redis` option `strictKeys: true` applies Memcached's key rules to a Redis client, to catch
+  keys that would not survive a backend switch.
+- New exported type `CacheCore`; both classes are declared `implements CacheCore`.
+- Validation moved to `src/validators.js` so both backends enforce one contract from one place.
+- New `test/coreContract.test.js` runs one scenario against both backends.
+- **Deprecated:** `redis.client.close()`. Call `redis.close()`; the monkey-patched alias will be
+  removed in the next major.
+
+**3.0.0 (2026-08-31) — major, contains breaking behavior changes described below:**
 - `Memcached`: keys containing whitespace are now rejected up front. Memcached's text protocol is
   space-delimited and the server rejects such keys itself, so they used to fail only at runtime.
 - `Memcached`: the 250-character key limit is now measured on the raw key. Whitespace was stripped
